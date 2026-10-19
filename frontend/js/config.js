@@ -10,7 +10,7 @@
      backend serves the pages too (same address).
    ============================================================ */
 
-const PRODUCTION_BACKEND_URL = 'https://YOUR-BACKEND-URL.onrender.com';
+const PRODUCTION_BACKEND_URL = 'https://bpsu-requora-production-aa03.up.railway.app';
 
 const REQUORA_CONFIG = (function () {
   const { hostname, port, protocol, origin } = window.location;
