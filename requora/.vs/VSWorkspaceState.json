@@ -1,0 +1,14 @@
+{
+  "ExpandedNodes": [
+    "",
+    "\\backend\\data",
+    "\\backend\\routes",
+    "\\backend\\scripts",
+    "\\backend\\services",
+    "\\backend\\tests",
+    "\\frontend",
+    "\\supabase"
+  ],
+  "SelectedNode": "\\start-requora.bat",
+  "PreviewInSolutionExplorer": false
+}

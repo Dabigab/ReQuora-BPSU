@@ -1,0 +1,27 @@
+# Optional Render "Blueprint". You can also create the service by hand (see DEPLOYMENT.md).
+services:
+  - type: web
+    name: bpsu-requora
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "1"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
+        value: admin@bpsu.edu.ph
+      - key: ADMIN_PASSWORD
+        sync: false   # you type this in the Render dashboard
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: item-images

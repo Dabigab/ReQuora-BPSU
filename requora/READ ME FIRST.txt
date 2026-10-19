@@ -1,0 +1,10 @@
+HOW TO OPEN REQUORA ON YOUR COMPUTER (no command prompt typing)
+
+1. Install Node.js once: https://nodejs.org (download the LTS version, click Next).
+2. Extract this whole zip (right-click > Extract All).
+3. Double-click  start-requora.bat
+4. Your browser opens ReQuora at http://localhost:5000
+   Admin login: admin@bpsu.edu.ph  /  Admin@123
+
+Keep the black window open while using the site. Close it to stop.
+First start takes about a minute (it installs packages).
