@@ -80,7 +80,7 @@ New reports start as *Pending Verification*; an admin verifies them. Old databas
 
 **Claims**: `pending` → `approved` / `rejected` → `completed`, or `cancelled` by the claimant.
 You cannot claim your own report, claim twice, or claim a returned/closed item. Only admins decide claims.
-Appointments are weekdays 8:00–16:30 (Philippine time).
+Appointments are weekdays 8:00–16:30 (Philippine time) and are held **inside the BPSU Main Campus only**. The administrator picks the place from `APPOINTMENT_LOCATIONS` (or types one and confirms it is on the Main Campus); the server rejects anything else. Claimants can only *request* another time or place, and an administrator must approve it. Run `supabase/migrations/2026-10-24_appointment_location.sql` once when using Supabase.
 
 **Notifications**: a bell in the header shows updates for the logged-in user (claim filed on your report, claim approved / not approved / handed over, report verified, report status changed). Admins are told about new claims. Only the owner of a notification can read it; the newest 100 per user are kept. The panel refreshes every minute while a page is open.
 
@@ -106,7 +106,8 @@ All responses: `{ "success": true, "data": …, "message"? }` or `{ "success": f
 | GET | `/api/items/:id` | optional | details + claim state for the viewer |
 | POST | `/api/items` | user | report (multipart, optional `image`) |
 | PUT, DELETE | `/api/items/:id` | owner/admin | edit / close / delete |
-| POST | `/api/claims` | user | file a claim + appointment |
+| POST | `/api/claims` | user | file a claim (a preferred time/place is only a request) |
+| PUT | `/api/claims/:id/appointment-request` | user | ask for another time / Main Campus place |
 | GET | `/api/claims/mine`, `/api/claims/item/:itemId` | user / reporter or admin | |
 | PUT | `/api/claims/:id/cancel` | claimant | cancel while pending |
 | GET, PUT | `/api/claims`, `/api/claims/:id` | admin | list, approve/reject/complete |

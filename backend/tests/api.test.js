@@ -483,6 +483,35 @@ describe('notifications, timelines and exports', () => {
     return { adminToken, reporter, claimant, id, claim: claim.body.data.claim };
   }
 
+  test('appointments are Main Campus only, enforced over HTTP', async () => {
+    process.env.APPOINTMENT_LOCATIONS = 'Place A;Place B';
+    try {
+      const { adminToken, claimant, claim } = await claimedScenario();
+      const when = { appointmentDate: weekdayFromNow(3), appointmentTime: '10:00' };
+
+      // The approved list is published for the dropdown.
+      assert.deepEqual((await request(app).get('/api/meta')).body.data.appointmentLocations, ['Place A', 'Place B']);
+
+      // Admin: outside the list is refused; inside is accepted and shown to the claimant.
+      const bad = await request(app).put(`/api/claims/${claim.id}`).set(auth(adminToken)).send({ ...when, appointmentLocation: 'Bagac campus', mainCampusConfirmed: true });
+      assert.equal(bad.status, 400);
+      const good = await request(app).put(`/api/claims/${claim.id}`).set(auth(adminToken)).send({ ...when, appointmentLocation: 'Place A' });
+      assert.equal(good.status, 200);
+      const mine = await request(app).get('/api/claims/mine').set(auth(claimant.token));
+      assert.equal(mine.body.data.claims[0].appointmentLocation, 'Place A');
+      assert.equal(mine.body.data.claims[0].appointmentCampus, 'BPSU Main Campus');
+
+      // Claimant: cannot set the place directly, only request it.
+      assert.equal((await request(app).put(`/api/claims/${claim.id}`).set(auth(claimant.token)).send({ ...when, appointmentLocation: 'Place B' })).status, 403);
+      assert.equal((await request(app).put(`/api/claims/${claim.id}/appointment-request`).set(auth(claimant.token)).send({ appointmentLocation: 'Somewhere else' })).status, 400);
+      const asked = await request(app).put(`/api/claims/${claim.id}/appointment-request`).set(auth(claimant.token)).send({ appointmentLocation: 'Place B' });
+      assert.equal(asked.status, 200);
+      assert.equal(asked.body.data.claim.appointmentLocation, 'Place A'); // unchanged until the office approves
+    } finally {
+      delete process.env.APPOINTMENT_LOCATIONS;
+    }
+  });
+
   test('notification routes need a login', async () => {
     assert.equal((await request(app).get('/api/notifications')).status, 401);
     assert.equal((await request(app).put('/api/notifications/read-all')).status, 401);

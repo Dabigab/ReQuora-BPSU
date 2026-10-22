@@ -186,7 +186,8 @@ const CLAIM_STATE_TEXT = {
 };
 
 function claimRowHtml(c) {
-  const visit = c.appointmentDate ? ` · ${icon('calendar', 14)} Visit ${escapeHtml(formatDate(c.appointmentDate))} at ${escapeHtml(formatTime12(c.appointmentTime))}` : '';
+  const visit = c.appointmentDate ? ` · ${icon('calendar', 14)} Appointment ${appointmentText(c)}` : '';
+  const requested = c.appointmentRequest ? `<p class="note-inline">${icon('clock', 14)} <span>Your request (${appointmentRequestText(c.appointmentRequest)}) is waiting for the office.</span></p>` : '';
   return `
     <article class="row-card row-card-claim">
       <a class="row-media" href="${escapeHtml(itemUrl(c.itemId))}" data-item-id="${escapeHtml(c.itemId)}" tabindex="-1" aria-hidden="true">
@@ -198,6 +199,7 @@ function claimRowHtml(c) {
         <p class="muted">${icon('tag', 14)} ${escapeHtml(c.itemCategory || '')} · ${icon('pin', 14)} ${escapeHtml(c.itemLocation || '—')} · ${icon('calendar', 14)} ${c.itemType === 'lost' ? 'Lost' : 'Found'} ${escapeHtml(formatDate(c.itemDate))}</p>
         <p class="muted">Claim Submitted ${escapeHtml(formatDateTime(c.createdAt))} · ${escapeHtml(c.reference)}${visit}</p>
         <p class="note-inline">${icon('info', 14)} <span>${escapeHtml(CLAIM_STATE_TEXT[c.status] || '')}</span></p>
+        ${requested}
         ${claimTimelineHtml(c)}
         <details class="evidence"><summary>My explanation and evidence</summary>
           <p><strong>Why it is mine:</strong> ${multiline(c.proofDescription)}</p>
@@ -219,6 +221,7 @@ function claimRowHtml(c) {
       </div>
       <div class="row-actions">
         <a class="btn btn-outline btn-sm" href="${escapeHtml(itemUrl(c.itemId))}" data-item-id="${escapeHtml(c.itemId)}">View item</a>
+        ${['pending', 'under_review', 'info_required', 'approved'].includes(c.status) ? `<button type="button" class="btn btn-outline btn-sm" data-request-appointment="${escapeHtml(c.id)}">Request time/place change</button>` : ''}
         ${['pending', 'info_required'].includes(c.status) ? `<button type="button" class="btn btn-ghost btn-sm" data-cancel-claim="${escapeHtml(c.id)}">Cancel claim</button>` : ''}
       </div>
     </article>`;
@@ -256,6 +259,12 @@ function renderClaims() {
         const orphan = showFieldErrors(form, err.fields);
         if (orphan.length || !err.fields || !Object.keys(err.fields).length) toast(orphan[0] || err.message, 'error');
       }
+    })
+  );
+  panel.querySelectorAll('[data-request-appointment]').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      const claim = myClaims.find((c) => c.id === btn.dataset.requestAppointment);
+      if (claim && (await openAppointmentRequestDialog(claim))) refreshAll();
     })
   );
   panel.querySelectorAll('[data-cancel-claim]').forEach((btn) =>

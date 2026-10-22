@@ -9,6 +9,7 @@
 const { verificationTier } = require('./constants');
 const claimWindow = require('../services/claimWindowService');
 const db = require('./db');
+const { CAMPUS_NAME } = require('./campusLocations');
 
 const userName = (id) => {
   const user = db.findUserById(id);
@@ -112,6 +113,8 @@ function serializeClaim(claim, item, view) {
     claimType: claim.claimType || 'ownership',
     appointmentDate: claim.appointmentDate,
     appointmentTime: claim.appointmentTime,
+    appointmentLocation: claim.appointmentLocation || null,
+    appointmentCampus: CAMPUS_NAME,
     verificationTier: claim.verificationTier || verificationTier(claim.itemCategory),
     createdAt: claim.createdAt,
     updatedAt: claim.updatedAt,
@@ -128,6 +131,7 @@ function serializeClaim(claim, item, view) {
   base.proofDescription = claim.proofDescription;
   base.ownershipEvidence = claim.ownershipEvidence || null;
   base.contactInfo = claim.contactInfo || null;
+  base.appointmentRequest = claim.appointmentRequest || null;
   base.officeNotes = claim.officeNotes || null;
   base.infoRequest = claim.infoRequest || null;
   base.infoRequestedAt = claim.infoRequestedAt || null;

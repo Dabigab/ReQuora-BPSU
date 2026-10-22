@@ -67,6 +67,8 @@ function createApp({ serveFrontend } = {}) {
       claimStatuses: C.CLAIM_STATUSES,
       claimWindowHours: C.CLAIM_WINDOW_HOURS,
       termsVersion: C.TERMS_VERSION,
+      appointmentCampus: require('./utils/campusLocations').CAMPUS_NAME,
+      appointmentLocations: require('./utils/campusLocations').approvedLocations(),
       limits: C.LIMITS,
     })
   );

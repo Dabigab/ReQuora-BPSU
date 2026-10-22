@@ -112,6 +112,7 @@ const LIMITS = {
   adminNotes: { max: 1000 },
   infoRequest: { min: 5, max: 500 },
   infoResponse: { min: 5, max: 1000 },
+  appointmentNote: { max: 300 },
   imageBytes: 5 * 1024 * 1024,
 };
 

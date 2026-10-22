@@ -301,7 +301,8 @@ function myClaimHtml(claim) {
         <dt>Claim Submitted</dt><dd>${escapeHtml(formatDateTime(claim.createdAt))}</dd>
         <dt>Your explanation</dt><dd>${multiline(claim.proofDescription)}</dd>
         ${claim.ownershipEvidence ? `<dt>Your identifying details</dt><dd>${multiline(claim.ownershipEvidence)}</dd>` : ''}
-        ${claim.appointmentDate ? `<dt>Planned visit</dt><dd>${escapeHtml(formatDate(claim.appointmentDate))} at ${escapeHtml(formatTime12(claim.appointmentTime))}</dd>` : ''}
+        ${claim.appointmentDate ? `<dt>Appointment</dt><dd>${appointmentText(claim)}</dd>` : ''}
+        ${claim.appointmentRequest ? `<dt>Your change request</dt><dd>${appointmentRequestText(claim.appointmentRequest)} <span class="muted">(waiting for the office)</span></dd>` : ''}
         <dt>Where</dt><dd>BPSU Lost and Found Office, Security Services Office, Main Gate Security Post</dd>
         ${claim.claimType === 'ownership' ? `<dt>Verification level</dt><dd>${escapeHtml(tier.label)}</dd>` : ''}
         ${claim.infoRequest ? `<dt>Office question</dt><dd>${multiline(claim.infoRequest)}</dd>` : ''}
@@ -317,7 +318,10 @@ function myClaimHtml(claim) {
              </form>`
           : ''
       }
-      ${['pending', 'info_required'].includes(claim.status) ? `<div class="inline-actions"><button type="button" class="btn btn-outline btn-sm" id="cancel-claim">${icon('x', 15)} Cancel my claim</button></div>` : ''}
+      <div class="inline-actions">
+        ${['pending', 'under_review', 'info_required', 'approved'].includes(claim.status) ? `<button type="button" class="btn btn-outline btn-sm" id="request-appointment">${icon('calendar', 15)} Request a different time or place</button>` : ''}
+        ${['pending', 'info_required'].includes(claim.status) ? `<button type="button" class="btn btn-outline btn-sm" id="cancel-claim">${icon('x', 15)} Cancel my claim</button>` : ''}
+      </div>
     </section>`;
 }
 
@@ -343,6 +347,13 @@ function wireMyClaim(claim) {
         const orphan = showFieldErrors(respond, err.fields);
         if (orphan.length || !Object.keys(err.fields || {}).length) toast(orphan[0] || err.message, 'error');
       }
+    });
+  }
+
+  const requestBtn = document.getElementById('request-appointment');
+  if (requestBtn) {
+    requestBtn.addEventListener('click', async () => {
+      if (await openAppointmentRequestDialog(claim)) await reload();
     });
   }
 
@@ -481,6 +492,8 @@ function reviewCardHtml(c, item, canDecide) {
         <dt>Contact</dt><dd>${escapeHtml(c.contactInfo || c.claimantEmail || '—')}</dd>
         ${c.infoRequest ? `<dt>Question you asked${c.infoRequestedAt ? ` (${escapeHtml(formatDateTime(c.infoRequestedAt))})` : ''}</dt><dd class="proof">${multiline(c.infoRequest)}</dd>` : ''}
         ${c.infoRequest ? `<dt>Their answer</dt><dd class="proof">${c.infoResponse ? multiline(c.infoResponse) : '<span class="muted">Waiting for an answer…</span>'}</dd>` : ''}
+        <dt>Appointment</dt><dd>${c.appointmentDate ? appointmentText(c) : '<span class="muted">Not scheduled yet</span>'}</dd>
+        ${c.appointmentRequest ? `<dt>Claimant asked for</dt><dd>${appointmentRequestText(c.appointmentRequest)}${c.appointmentRequest.note ? `<br><span class="muted">${escapeHtml(c.appointmentRequest.note)}</span>` : ''}</dd>` : ''}
         ${c.reviewedAt ? `<dt>Last decision</dt><dd>${escapeHtml(formatDateTime(c.reviewedAt))}${c.reviewedByName ? ` by ${escapeHtml(c.reviewedByName)}` : ''}</dd>` : ''}
       </dl>
       ${decisionHistoryHtml(c)}
@@ -495,6 +508,7 @@ function reviewCardHtml(c, item, canDecide) {
               `<button type="button" class="btn btn-sm ${ADMIN_ACTION_VARIANT[a] || 'btn-outline'}" data-decide="${a}" ${decisionBlocked(a) ? 'disabled title="Available when the claiming period ends"' : ''}>${escapeHtml(ADMIN_ACTION_LABEL[a])}</button>`
           )
           .join('')}
+        ${['pending', 'under_review', 'info_required', 'approved'].includes(c.status) ? `<button type="button" class="btn btn-outline btn-sm" data-schedule>${icon('calendar', 15)} ${c.appointmentDate ? 'Reschedule' : 'Schedule appointment'}</button>` : ''}
         <button type="button" class="btn btn-ghost btn-sm" data-save-notes>Save notes</button>
       </div>
     </article>`;
@@ -526,6 +540,7 @@ async function loadAdminReview() {
   try {
     const data = await apiRequest(`/claims/item/${current.item.id}`, { auth: true });
     box.innerHTML = adminReviewHtml(current.item, data.claims);
+    box._claims = data.claims;
     wireAdminReview(box);
     startCountdowns(reload);
   } catch (err) {
@@ -599,6 +614,15 @@ function wireAdminReview(box) {
         toast(detail || err.message, 'error');
       }
     };
+
+    const scheduleBtn = card.querySelector('[data-schedule]');
+    if (scheduleBtn) {
+      scheduleBtn.addEventListener('click', async () => {
+        const claim = (box._claims || []).find((x) => x.id === id);
+        const body = claim && (await openScheduleDialog(claim));
+        if (body) await send(body, body.dismissAppointmentRequest ? 'Request declined.' : 'Appointment saved.');
+      });
+    }
 
     card.querySelector('[data-save-notes]').addEventListener('click', () =>
       send({ officeNotes: officeField.value.trim(), adminNotes: adminField.value.trim() }, 'Notes saved.')

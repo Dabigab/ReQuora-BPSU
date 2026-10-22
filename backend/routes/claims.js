@@ -49,6 +49,12 @@ router.put('/:id/respond', authenticateToken, (req, res) => {
   return ok(res, { claim }, 'Thank you. The office has your answer.');
 });
 
+// PUT /api/claims/:id/appointment-request — ask for another time/Main Campus place (an administrator must approve)
+router.put('/:id/appointment-request', authenticateToken, (req, res) => {
+  const claim = claimService.requestAppointmentChange(req.user, req.params.id, req.body);
+  return ok(res, { claim }, 'Request sent. The office will confirm any change.');
+});
+
 // PUT /api/claims/:id — the office's decision (admin only)
 router.put('/:id', authenticateToken, requireAdmin, (req, res) => {
   const claim = claimService.decideClaim(req.user, req.params.id, req.body);

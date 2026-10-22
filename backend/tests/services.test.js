@@ -425,10 +425,77 @@ describe('the office review of claims', () => {
     throwsApi(() => claimService.decideClaim(admin, claim.id, {}), 400);
   });
 
-  test('the office can reschedule within office rules', () => {
-    const updated = claimService.decideClaim(admin, claim.id, { appointmentDate: weekdayFromNow(3), appointmentTime: '14:30' });
+  test('the office can reschedule within office rules, at a confirmed Main Campus place', () => {
+    const when = { appointmentDate: weekdayFromNow(3), appointmentTime: '14:30' };
+    const place = { appointmentLocation: 'Test Hall Room 1', mainCampusConfirmed: true };
+    const updated = claimService.decideClaim(admin, claim.id, { ...when, ...place });
     assert.equal(updated.appointmentTime, '14:30');
-    throwsApi(() => claimService.decideClaim(admin, claim.id, { appointmentTime: '18:00' }), 400);
+    assert.equal(updated.appointmentLocation, 'Test Hall Room 1');
+    assert.equal(updated.appointmentCampus, 'BPSU Main Campus');
+    throwsApi(() => claimService.decideClaim(admin, claim.id, { ...when, ...place, appointmentTime: '18:00' }), 400);
+  });
+
+  test('an appointment cannot be set without a Main Campus place, or at another campus / off campus', () => {
+    const when = { appointmentDate: weekdayFromNow(3), appointmentTime: '14:30' };
+    throwsApi(() => claimService.decideClaim(admin, claim.id, when), 400); // no place at all
+    throwsApi(() => claimService.decideClaim(admin, claim.id, { ...when, appointmentLocation: 'Test Hall' }), 400); // not confirmed
+    throwsApi(() => claimService.decideClaim(admin, claim.id, { ...when, appointmentLocation: 'Bagac Campus library', mainCampusConfirmed: true }), 400);
+    throwsApi(() => claimService.decideClaim(admin, claim.id, { ...when, appointmentLocation: 'Off-campus coffee shop', mainCampusConfirmed: true }), 400);
+    throwsApi(() => claimService.decideClaim(admin, claim.id, { ...when, appointmentLocation: ['x'], mainCampusConfirmed: true }), 400);
+    assert.equal(db.getClaimById(claim.id).appointmentLocation, null);
+  });
+
+  test('rescheduling keeps the place inside the Main Campus', () => {
+    const base = { appointmentDate: weekdayFromNow(3), appointmentTime: '09:00', appointmentLocation: 'Test Hall Room 1', mainCampusConfirmed: true };
+    claimService.decideClaim(admin, claim.id, base);
+    const moved = claimService.decideClaim(admin, claim.id, { appointmentDate: weekdayFromNow(4) }); // keeps the stored place
+    assert.equal(moved.appointmentLocation, 'Test Hall Room 1');
+    throwsApi(() => claimService.decideClaim(admin, claim.id, { appointmentLocation: 'Hermosa campus gym', mainCampusConfirmed: true }), 400);
+    assert.equal(db.getClaimById(claim.id).appointmentLocation, 'Test Hall Room 1');
+  });
+
+  test('only configured locations are accepted when the approved list is set', () => {
+    process.env.APPOINTMENT_LOCATIONS = 'Place A; Place B';
+    try {
+      const when = { appointmentDate: weekdayFromNow(3), appointmentTime: '14:30' };
+      throwsApi(() => claimService.decideClaim(admin, claim.id, { ...when, appointmentLocation: 'Place C', mainCampusConfirmed: true }), 400);
+      const ok = claimService.decideClaim(admin, claim.id, { ...when, appointmentLocation: 'place b' });
+      assert.equal(ok.appointmentLocation, 'Place B'); // stored in the approved spelling
+    } finally {
+      delete process.env.APPOINTMENT_LOCATIONS;
+    }
+  });
+
+  test('a claimant can only request a change; the appointment itself stays put', () => {
+    const when = { appointmentDate: weekdayFromNow(3), appointmentTime: '09:00', appointmentLocation: 'Test Hall Room 1', mainCampusConfirmed: true };
+    claimService.decideClaim(admin, claim.id, when);
+
+    const asked = claimService.requestAppointmentChange(juan, claim.id, {
+      appointmentDate: weekdayFromNow(5),
+      appointmentTime: '13:00',
+      appointmentLocation: 'Test Hall Room 2',
+    });
+    assert.equal(asked.appointmentLocation, 'Test Hall Room 1');
+    assert.equal(asked.appointmentRequest.location, 'Test Hall Room 2');
+
+    throwsApi(() => claimService.requestAppointmentChange(juan, claim.id, { appointmentLocation: 'Orani campus' }), 400);
+    throwsApi(() => claimService.requestAppointmentChange(maria, claim.id, { appointmentLocation: 'Test Hall Room 2' }), 403);
+    throwsApi(() => claimService.requestAppointmentChange(juan, claim.id, {}), 400);
+
+    // Approving = the administrator reschedules; the request is cleared.
+    const settled = claimService.decideClaim(admin, claim.id, {
+      appointmentDate: weekdayFromNow(5), appointmentTime: '13:00', appointmentLocation: 'Test Hall Room 2', mainCampusConfirmed: true,
+    });
+    assert.equal(settled.appointmentRequest, null);
+    assert.equal(settled.appointmentLocation, 'Test Hall Room 2');
+  });
+
+  test('a date, time or place sent while claiming is only a request', () => {
+    const second = makeUser('Third Person', 'third@bpsu.edu.ph');
+    const made = claimService.createClaim(second, claimBody(found.id, { appointmentLocation: 'Test Hall Room 3' }));
+    assert.equal(made.appointmentLocation, null);
+    assert.equal(made.appointmentDate, null);
+    assert.equal(made.appointmentRequest.location, 'Test Hall Room 3');
   });
 
   test('closing a report directly rejects its open claims; returning completes the approved one', () => {

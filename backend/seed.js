@@ -106,6 +106,7 @@ async function seed() {
     created[s.title] = item;
   });
 
+  const seedLocation = require('./utils/campusLocations').approvedLocations()[0] || null;
   const claimOn = (title, claimant, status, extra = {}) =>
     createClaim({
       itemId: created[title].id,
@@ -117,8 +118,9 @@ async function seed() {
       claimantEmail: claimant.email,
       contactInfo: claimant.email,
       verificationTier: verificationTier(created[title].category),
-      appointmentDate: nextWeekday(1),
-      appointmentTime: '10:00',
+      // Demo appointments only exist when the project administrator configured approved
+      // Main Campus locations (APPOINTMENT_LOCATIONS); no building name is invented here.
+      ...(seedLocation ? { appointmentDate: nextWeekday(1), appointmentTime: '10:00', appointmentLocation: seedLocation } : {}),
       status,
       ...extra,
     });

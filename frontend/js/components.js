@@ -414,3 +414,118 @@ function safeNext(raw, fallback = 'dashboard.html') {
   if (!raw) return fallback;
   return /^[a-z0-9_-]+\.html(\?[\w=&%.-]*)?$/i.test(raw) ? raw : fallback;
 }
+
+/* ------------------------------------------------------------
+   Appointments — always inside the BPSU Main Campus.
+   The server enforces this; these helpers only make it easy to follow.
+   ------------------------------------------------------------ */
+const MAIN_CAMPUS = 'BPSU Main Campus';
+
+// "Mon, Oct 26 at 10:00 AM · <place> (BPSU Main Campus)" as safe HTML, or '' when none is booked.
+function appointmentText(c) {
+  if (!c.appointmentDate) return '';
+  const place = c.appointmentLocation ? ` · ${escapeHtml(c.appointmentLocation)} (${MAIN_CAMPUS})` : ` · place to be confirmed by the office (${MAIN_CAMPUS})`;
+  return `${escapeHtml(formatDate(c.appointmentDate))} at ${escapeHtml(formatTime12(c.appointmentTime))}${place}`;
+}
+
+function appointmentRequestText(r) {
+  const parts = [];
+  if (r.date) parts.push(`${escapeHtml(formatDate(r.date))} at ${escapeHtml(formatTime12(r.time))}`);
+  if (r.location) parts.push(escapeHtml(r.location));
+  return parts.join(' · ');
+}
+
+// A dropdown of the approved places, or a text box when none are configured.
+function locationFieldHtml(meta, id, value, { admin = false } = {}) {
+  const places = meta.appointmentLocations || [];
+  if (places.length) {
+    return `<select id="${id}"><option value="">Choose a ${MAIN_CAMPUS} location</option>${places
+      .map((p) => `<option value="${escapeHtml(p)}" ${p === value ? 'selected' : ''}>${escapeHtml(p)}</option>`)
+      .join('')}</select>`;
+  }
+  return `<input id="${id}" maxlength="150" value="${escapeHtml(value || '')}" placeholder="A specific place inside the ${MAIN_CAMPUS}">
+    ${admin ? `<label class="check-label"><input type="checkbox" id="${id}-confirm"> This place is inside the ${MAIN_CAMPUS}</label>` : ''}`;
+}
+
+// Administrator: schedule or reschedule. Resolves to the request body, or null when cancelled.
+async function openScheduleDialog(claim) {
+  const meta = await loadMeta();
+  const req = claim.appointmentRequest;
+  const result = await openDialog({
+    title: claim.appointmentDate ? 'Reschedule appointment' : 'Schedule appointment',
+    bodyHtml: `<p class="muted">Appointments are held inside the ${MAIN_CAMPUS} only.</p>
+      ${req ? `<div class="note note-gold"><span>The claimant asked for: ${appointmentRequestText(req)}${req.note ? `. “${escapeHtml(req.note)}”` : ''}</span></div>` : ''}
+      <div class="form-row">
+        <div class="form-field"><label for="ap-date">Date</label><input type="date" id="ap-date" value="${escapeHtml(claim.appointmentDate || (req && req.date) || '')}"></div>
+        <div class="form-field"><label for="ap-time">Time</label><input type="time" id="ap-time" min="08:00" max="16:30" value="${escapeHtml(claim.appointmentTime || (req && req.time) || '')}"></div>
+      </div>
+      <div class="form-field"><label for="ap-place">Meeting place</label>${locationFieldHtml(meta, 'ap-place', claim.appointmentLocation || (req && req.location), { admin: true })}</div>`,
+    actions: [
+      { label: 'Cancel', value: 'cancel', variant: 'ghost' },
+      ...(req ? [{ label: 'Decline request', value: 'decline', variant: 'outline' }] : []),
+      {
+        label: 'Save appointment',
+        value: 'ok',
+        variant: 'primary',
+        validate: (panel) => {
+          clearFieldErrors(panel);
+          const errors = {};
+          if (!panel.querySelector('#ap-date').value) errors['ap-date'] = 'Choose a date.';
+          if (!panel.querySelector('#ap-time').value) errors['ap-time'] = 'Choose a time.';
+          if (!panel.querySelector('#ap-place').value.trim()) errors['ap-place'] = `Choose a place inside the ${MAIN_CAMPUS}.`;
+          else if ((meta.appointmentLocations || []).length === 0 && !panel.querySelector('#ap-place-confirm').checked) {
+            errors['ap-place'] = `Confirm that this place is inside the ${MAIN_CAMPUS}.`;
+          }
+          if (Object.keys(errors).length) {
+            showFieldErrors(panel, errors);
+            return false;
+          }
+          return true;
+        },
+      },
+    ],
+    collect: (panel) => ({
+      appointmentDate: panel.querySelector('#ap-date').value,
+      appointmentTime: panel.querySelector('#ap-time').value,
+      appointmentLocation: panel.querySelector('#ap-place').value.trim(),
+      mainCampusConfirmed: (meta.appointmentLocations || []).length ? true : !!panel.querySelector('#ap-place-confirm').checked,
+    }),
+  });
+  if (result.action === 'decline') return { dismissAppointmentRequest: true };
+  return result.action === 'ok' ? result.data : null;
+}
+
+// Claimant: ask for another time and/or place. Resolves to true when the request was sent.
+async function openAppointmentRequestDialog(claim) {
+  const meta = await loadMeta();
+  const result = await openDialog({
+    title: 'Request a different time or place',
+    bodyHtml: `<p class="muted">You can only ask. The office decides, and every appointment stays inside the ${MAIN_CAMPUS}. Your current appointment does not change until the office approves.</p>
+      <div class="form-row">
+        <div class="form-field"><label for="rq-date">Preferred date <span class="optional">(optional)</span></label><input type="date" id="rq-date"></div>
+        <div class="form-field"><label for="rq-time">Preferred time</label><input type="time" id="rq-time" min="08:00" max="16:30"></div>
+      </div>
+      <div class="form-field"><label for="rq-place">Preferred place <span class="optional">(optional)</span></label>${locationFieldHtml(meta, 'rq-place', '')}</div>
+      <div class="form-field"><label for="rq-note">Note <span class="optional">(optional)</span></label><textarea id="rq-note" rows="2" maxlength="300"></textarea></div>`,
+    actions: [
+      { label: 'Cancel', value: 'cancel', variant: 'ghost' },
+      { label: 'Send request', value: 'ok', variant: 'primary' },
+    ],
+    collect: (panel) => ({
+      appointmentDate: panel.querySelector('#rq-date').value,
+      appointmentTime: panel.querySelector('#rq-time').value,
+      appointmentLocation: panel.querySelector('#rq-place').value.trim(),
+      appointmentNote: panel.querySelector('#rq-note').value.trim(),
+    }),
+  });
+  if (result.action !== 'ok') return false;
+  try {
+    await apiRequest(`/claims/${claim.id}/appointment-request`, { method: 'PUT', auth: true, body: result.data });
+    toast('Request sent. The office will confirm any change.');
+    return true;
+  } catch (err) {
+    const detail = err.fields && Object.values(err.fields)[0];
+    toast(detail || err.message, 'error');
+    return false;
+  }
+}

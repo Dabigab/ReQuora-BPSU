@@ -52,6 +52,7 @@ function claimsCsv() {
     { label: 'Claimant email', value: (c) => c.claimantEmail },
     { label: 'Appointment date', value: (c) => c.appointmentDate },
     { label: 'Appointment time', value: (c) => c.appointmentTime },
+    { label: 'Appointment location (BPSU Main Campus)', value: (c) => c.appointmentLocation },
     { label: 'Filed at', value: (c) => iso(c.createdAt) },
     { label: 'Reviewed at', value: (c) => iso(c.reviewedAt) },
     { label: 'Office notes', value: (c) => c.officeNotes || '' },

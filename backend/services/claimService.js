@@ -36,6 +36,7 @@ const {
 } = require('../utils/constants');
 const { textField, throwIfInvalid, isUuid, isIsoDate, isClockTime, clean, asString, queryString } = require('../utils/validate');
 const { serializeClaim } = require('../utils/serialize');
+const campus = require('../utils/campusLocations');
 
 const MAX_DAYS_AHEAD = 60;
 
@@ -75,6 +76,36 @@ function validateAppointment(dateStr, timeStr, now = officeNow()) {
   return null;
 }
 
+/**
+ * Reads a claimant's wish for a different time and/or place. It is only a request:
+ * nothing about the real appointment changes until an administrator approves it.
+ * Problems are recorded in `fields`; returns null when the claimant asked for nothing.
+ */
+function parseAppointmentRequest(body, fields) {
+  const date = clean(asString(body.appointmentDate));
+  const time = clean(asString(body.appointmentTime));
+  const location = clean(asString(body.appointmentLocation));
+  const note = textField(fields, 'appointmentNote', body.appointmentNote, { label: 'Your note', max: LIMITS.appointmentNote.max });
+  if (!date && !time && !location) return null;
+
+  if (date || time) {
+    const err = validateAppointment(date, time);
+    if (err) fields.appointment = err;
+  }
+  let place = null;
+  if (location) {
+    // Claimants only suggest; the administrator confirms the place when approving.
+    const checked = campus.checkLocation(location, { confirmedMainCampus: true });
+    if (checked.error) fields.appointmentLocation = checked.error;
+    else place = checked.value;
+  }
+  return { date: date || null, time: time || null, location: place, note: note || null, requestedAt: new Date().toISOString() };
+}
+
+function appointmentSentence(claim) {
+  return `${claim.appointmentDate} at ${claim.appointmentTime}, ${claim.appointmentLocation} (${campus.CAMPUS_NAME})`;
+}
+
 function findClaimOr404(id) {
   if (!isUuid(id)) throw Errors.notFound('That claim could not be found.');
   const claim = db.getClaimById(id);
@@ -109,15 +140,10 @@ function createClaim(user, body) {
   const proof = textField(fields, 'proofDescription', body.proofDescription, { label: 'Your explanation', ...LIMITS.proof, required: true });
   const evidence = textField(fields, 'ownershipEvidence', body.ownershipEvidence, { label: 'Ownership evidence', max: LIMITS.ownershipEvidence.max });
   const contactInfo = textField(fields, 'contactInfo', body.contactInfo, { label: 'Contact info', max: LIMITS.contactInfo.max });
-  // A visit date is optional: the office books the hand-over after it decides.
-  const appointmentDate = clean(asString(body.appointmentDate));
-  const appointmentTime = clean(asString(body.appointmentTime));
-  let appointmentError = null;
-  if (appointmentDate || appointmentTime) {
-    appointmentError = validateAppointment(appointmentDate, appointmentTime);
-    if (appointmentError) fields.appointment = appointmentError;
-  }
-  throwIfInvalid(fields, appointmentError || 'Please check the highlighted fields.');
+  // The office books the appointment (always inside the Main Campus). A date, time or
+  // place sent here is only the claimant's preference, kept as a request for the office.
+  const appointmentRequest = parseAppointmentRequest(body, fields);
+  throwIfInvalid(fields, fields.appointment || fields.appointmentLocation || 'Please check the highlighted fields.');
 
   // One claim per person per report (a withdrawn claim does not count).
   const existing = db.getClaims({ itemId, claimantId: user.id }).find((c) => c.status !== 'cancelled');
@@ -136,8 +162,10 @@ function createClaim(user, body) {
     contactInfo: contactInfo || null,
     proofDescription: proof,
     ownershipEvidence: evidence || null,
-    appointmentDate: appointmentDate || null,
-    appointmentTime: appointmentTime || null,
+    appointmentDate: null,
+    appointmentTime: null,
+    appointmentLocation: null,
+    appointmentRequest,
     verificationTier: verificationTier(item.category),
   });
 
@@ -238,15 +266,39 @@ function respondToInfoRequest(user, id, body) {
   return serializeClaim(updated, db.getItemById(claim.itemId), 'claimant');
 }
 
+// The claimant asks for another time and/or another Main Campus place. The appointment
+// itself is untouched; an administrator must approve it by rescheduling.
+function requestAppointmentChange(user, id, body) {
+  const claim = findClaimOr404(id);
+  if (claim.claimantId !== user.id) throw Errors.forbidden('You can only change requests on your own claims.');
+  if (!['pending', 'under_review', 'info_required', 'approved'].includes(claim.status)) {
+    throw Errors.conflict('An appointment change can only be requested for a claim that is still active.');
+  }
+  const fields = {};
+  const request = parseAppointmentRequest(body, fields);
+  if (!request && !Object.keys(fields).length) fields.appointment = 'Choose a different date and time, or a different Main Campus place.';
+  throwIfInvalid(fields, fields.appointment || fields.appointmentLocation || 'Please check the highlighted fields.');
+
+  const item = db.getItemById(claim.itemId);
+  const updated = db.updateClaim(claim.id, { appointmentRequest: request });
+  notifications.notifyAdmins({
+    type: 'claim_received',
+    title: 'Appointment change requested',
+    message: `${claim.claimantName} asked to change the appointment for "${(item && item.title) || claim.itemTitle}".`,
+    link: `item.html?id=${claim.itemId}`,
+  });
+  return serializeClaim(updated, item, 'claimant');
+}
+
 /* ------------------------------------------------------------
    The office's decision (admin only — enforced by the route AND here)
    ------------------------------------------------------------ */
 // Tells the claimant what the office decided. Never mentions other claimants.
 function notifyClaimant(claim, item) {
   const title = (item && item.title) || claim.itemTitle || 'your item';
-  const visit = claim.appointmentDate ? ` on ${claim.appointmentDate} at ${claim.appointmentTime}` : '';
+  const visit = claim.appointmentLocation ? ` Your appointment: ${appointmentSentence(claim)}.` : '';
   const copy = {
-    approved: ['Your claim was approved', `Bring your reference number and a valid ID to the Lost and Found Office${visit}.`],
+    approved: ['Your claim was approved', `Bring your reference number and a valid ID to the Lost and Found Office.${visit}`],
     rejected: ['Your claim was not approved', claim.officeNotes ? `Reason: ${claim.officeNotes}` : 'Visit the office for details.'],
     completed: ['Item handed over', `${title} has been released to you. Thank you for using ReQuora!`],
     pending: ['Your claim is back in the queue', 'The office reopened your claim.'],
@@ -298,15 +350,32 @@ function decideClaim(admin, id, body) {
     }
   }
 
-  if (body.appointmentDate !== undefined || body.appointmentTime !== undefined) {
+  // Scheduling or rescheduling: date, time AND a Main Campus place must all be valid.
+  // A claimant's request never reaches this code path; only an administrator can set these.
+  let appointmentChanged = false;
+  if (body.appointmentDate !== undefined || body.appointmentTime !== undefined || body.appointmentLocation !== undefined) {
     const date = clean(asString(body.appointmentDate)) || claim.appointmentDate;
     const time = clean(asString(body.appointmentTime)) || claim.appointmentTime;
     const err = validateAppointment(date, time);
     if (err) fields.appointment = err;
-    else {
+
+    // A kept place is re-checked too, so an old value cannot slip past a changed approved list.
+    const typed = body.appointmentLocation !== undefined ? body.appointmentLocation : claim.appointmentLocation;
+    const place = campus.checkLocation(typed, {
+      confirmedMainCampus: body.appointmentLocation !== undefined ? body.mainCampusConfirmed === true : true,
+    });
+    if (place.error) fields.appointmentLocation = place.error;
+
+    if (!err && !place.error) {
       updates.appointmentDate = date;
       updates.appointmentTime = time;
+      updates.appointmentLocation = place.value;
+      updates.appointmentRequest = null; // the administrator has settled the claimant's request
+      appointmentChanged = true;
     }
+  }
+  if (body.dismissAppointmentRequest === true && claim.appointmentRequest) {
+    updates.appointmentRequest = null;
   }
   throwIfInvalid(fields);
 
@@ -337,6 +406,21 @@ function decideClaim(admin, id, body) {
 
   const updated = db.updateClaim(claim.id, updates);
   if (updates.status) notifyClaimant(updated, item);
+  if (appointmentChanged && next !== 'approved') {
+    notifications.notify(claim.claimantId, {
+      type: 'claim_appointment',
+      title: 'Your appointment',
+      message: `${(item && item.title) || claim.itemTitle}: ${appointmentSentence(updated)}. Bring your reference number and a valid ID.`,
+      link: 'dashboard.html#claims',
+    });
+  } else if (!appointmentChanged && claim.appointmentRequest && updates.appointmentRequest === null) {
+    notifications.notify(claim.claimantId, {
+      type: 'claim_appointment',
+      title: 'Appointment request reviewed',
+      message: `${(item && item.title) || claim.itemTitle}: the office kept the current appointment arrangement.`,
+      link: 'dashboard.html#claims',
+    });
+  }
 
   // Keep the report's own status in step with the claim.
   if (updates.status && item) {
@@ -391,5 +475,6 @@ module.exports = {
   listAll,
   cancelClaim,
   respondToInfoRequest,
+  requestAppointmentChange,
   decideClaim,
 };
