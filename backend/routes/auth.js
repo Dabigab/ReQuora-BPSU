@@ -38,6 +38,7 @@ router.post(
     const email = clean(asString(req.body.email)).toLowerCase();
     if (!email) fields.email = 'Email address is required.';
     else if (!isEmail(email) || email.length > LIMITS.email.max) fields.email = 'Please enter a valid email address.';
+    else if (!/@([a-z0-9-]+\.)*bpsu\.edu\.ph$/.test(email)) fields.email = 'Please register with your BPSU email address (@bpsu.edu.ph).';
     const studentId = textField(fields, 'studentId', req.body.studentId, { label: 'Student / employee ID', max: LIMITS.studentId.max });
     const password = checkPassword(fields, 'password', req.body.password, 'Password');
     const requestedRole = clean(asString(req.body.role));
