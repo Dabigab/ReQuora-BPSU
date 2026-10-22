@@ -29,6 +29,7 @@ const {
 } = require('../utils/validate');
 const { serializeItem, serializeClaim } = require('../utils/serialize');
 const { photoStorage } = require('../utils/photoStorage');
+const claimWindow = require('./claimWindowService');
 
 // "Today" in Philippine time as YYYY-MM-DD (the server may run anywhere).
 function officeToday() {
@@ -110,6 +111,7 @@ function sortItems(items, sort) {
 }
 
 function listItems(query, viewer) {
+  claimWindow.sweepDeadlines();
   const filters = parseFilters(query);
   const sorted = sortItems(db.getItems(filters), queryString(query.sort, 10));
   const { slice, pagination } = paginate(sorted, query);
@@ -117,6 +119,7 @@ function listItems(query, viewer) {
 }
 
 function getItemForViewer(id, viewer) {
+  claimWindow.sweepDeadlines();
   const item = findItemOr404(id);
   const claims = viewer ? db.getClaims({ itemId: item.id, claimantId: viewer.id }) : [];
   const myClaim = claims.find((c) => c.status !== 'cancelled') || null;
@@ -127,8 +130,8 @@ function getItemForViewer(id, viewer) {
     !!viewer &&
     !owner &&
     viewer.role !== 'admin' &&
-    OPEN_STATUSES.includes(item.status) &&
-    !(myClaim && ['pending', 'approved'].includes(myClaim.status));
+    claimWindow.isOpen(item) &&
+    !myClaim; // one claim per person; a withdrawn claim does not count
 
   return {
     item: serializeItem(item, viewer, { canSeeContact: approvedClaimant }),
@@ -137,17 +140,22 @@ function getItemForViewer(id, viewer) {
   };
 }
 
+// Claims still in the running for a report (everything except withdrawn ones).
+const countedClaims = (itemId) => db.getClaims({ itemId }).filter((c) => c.status !== 'cancelled');
+
+// "My Reports": only what this person reported (as the finder or the loser) — never what they claimed.
 function listMine(user, query) {
+  claimWindow.sweepDeadlines();
   const filters = parseFilters({ ...query, status: query.status || 'all' });
   filters.reportedBy = user.id;
   const sorted = db.getItems(filters);
   const { slice, pagination } = paginate(sorted, query, 20);
   const items = slice.map((i) => {
-    const claims = db.getClaims({ itemId: i.id });
+    const claims = countedClaims(i.id);
     return {
       ...serializeItem(i, user),
       claimsCount: claims.length,
-      pendingClaims: claims.filter((c) => c.status === 'pending').length,
+      pendingClaims: claims.filter((c) => ['pending', 'under_review', 'info_required'].includes(c.status)).length,
     };
   });
   return { items, pagination };
@@ -193,6 +201,11 @@ function validateReportFields(body, { partial = false } = {}) {
   if (has('contactInfo')) {
     values.contactInfo = textField(fields, 'contactInfo', body.contactInfo, { label: 'Contact info', max: LIMITS.contactInfo.max }) || null;
   }
+  // A detail only the real owner could describe (never shown to the public).
+  if (has('verificationHint')) {
+    values.verificationHint =
+      textField(fields, 'verificationHint', body.verificationHint, { label: 'Private verification detail', max: LIMITS.verificationHint.max }) || null;
+  }
 
   throwIfInvalid(fields);
   return values;
@@ -206,16 +219,22 @@ function createReport(user, body, file) {
 
   const values = validateReportFields(body);
 
+  // The report is published (visible and claimable) the moment it is created. For a found item the
+  // 24-hour claiming period starts now; the deadline comes from the server clock, never from the client.
+  const publishedAt = new Date().toISOString();
   const item = db.createItem({
     type,
     ...values,
     time: values.time || null,
     additionalDetails: values.additionalDetails || null,
     contactInfo: values.contactInfo || null,
+    verificationHint: type === 'found' ? values.verificationHint || null : null,
     imageUrl: file ? file.url || `/uploads/${file.filename}` : null,
     status: 'pending_verification',
     reportedBy: user.id,
     reportedByName: user.name,
+    createdAt: publishedAt,
+    ...(type === 'found' ? { claimDeadline: claimWindow.deadlineFor(publishedAt) } : {}),
   });
   return serializeItem(item, user);
 }
@@ -240,7 +259,11 @@ function updateReport(user, id, body) {
     if (admin) {
       updates.status = checkAdminStatus(item, status);
     } else if (status === 'closed' && OPEN_STATUSES.includes(item.status)) {
-      updates.status = 'closed'; // an owner may withdraw their own report
+      // An owner may withdraw their own report, but not while people are waiting on their claims.
+      if (db.getClaims({ itemId: item.id }).some((c) => c.status !== 'cancelled' && c.status !== 'rejected')) {
+        throw Errors.conflict('People have already submitted claims on this report, so only the Lost and Found Office can close it.');
+      }
+      updates.status = 'closed';
     } else {
       throw Errors.forbidden('You can only close your own open reports. Other status changes are made by the office.');
     }
@@ -259,6 +282,14 @@ function checkAdminStatus(item, status) {
   if ((status === 'lost' || status === 'found') && status !== item.type) {
     throw Errors.validation(`This is a ${item.type} report, so its active status is "${item.type}".`, { status: `Use "${item.type}" for this report.` });
   }
+  // A report whose claiming period ended can only be reopened through "Reopen claiming" (new, explicit deadline).
+  if (status === item.type && claimWindow.hasEnded(item)) {
+    throw Errors.conflict('The claiming period has ended. Use "Reopen claiming" to give claimants more time.');
+  }
+  // "Claim approved" and "Resolved" are reached by deciding a claim, not by editing the status.
+  if (status === 'claimed' && !db.getClaims({ itemId: item.id }).some((c) => c.status === 'approved')) {
+    throw Errors.conflict('Approve a claim first; the report becomes "Claim approved" automatically.');
+  }
   return status;
 }
 
@@ -269,19 +300,20 @@ function syncClaimsWithItemStatus(item) {
   const tell = (c, title, message) =>
     notifications.notify(c.claimantId, { type: `claim_${c.status}`, title, message: `${item.title}: ${message}`, link: `item.html?id=${item.id}` });
 
+  const undecided = ['pending', 'under_review', 'info_required'];
   if (item.status === 'returned') {
     for (const c of claims) {
       if (c.status === 'approved') {
         db.updateClaim(c.id, { status: 'completed', reviewedAt: now });
         tell({ ...c, status: 'completed' }, 'Item handed over', 'the item has been released to you. Thank you for using ReQuora!');
-      } else if (c.status === 'pending') {
+      } else if (undecided.includes(c.status)) {
         db.updateClaim(c.id, { status: 'rejected', reviewedAt: now, officeNotes: c.officeNotes || 'The item was returned to its owner.' });
         tell({ ...c, status: 'rejected' }, 'Your claim was not approved', 'the item was returned to its owner.');
       }
     }
   } else if (item.status === 'closed') {
     for (const c of claims) {
-      if (c.status === 'pending' || c.status === 'approved') {
+      if (undecided.includes(c.status) || c.status === 'approved') {
         db.updateClaim(c.id, { status: 'rejected', reviewedAt: now, officeNotes: c.officeNotes || 'This report was closed.' });
         tell({ ...c, status: 'rejected' }, 'Your claim was not approved', 'this report was closed.');
       }
@@ -294,8 +326,9 @@ function removeReport(user, id) {
   if (!isOwnerOrAdmin(user, item)) throw Errors.forbidden('You can only delete reports that you filed.');
 
   if (user.role !== 'admin') {
-    const hasActiveClaim = db.getClaims({ itemId: item.id }).some((c) => c.status === 'approved' || c.status === 'completed');
-    if (!OPEN_STATUSES.includes(item.status) || hasActiveClaim) {
+    // Once anyone has claimed the item, only the office may remove the report.
+    const hasClaims = db.getClaims({ itemId: item.id }).some((c) => c.status !== 'cancelled');
+    if (!OPEN_STATUSES.includes(item.status) || hasClaims) {
       throw Errors.conflict('This report is already being processed and can no longer be deleted. Ask the Lost and Found Office to close it.');
     }
   }

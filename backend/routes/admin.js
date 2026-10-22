@@ -32,6 +32,11 @@ router.put('/items/:id/status', (req, res) =>
   ok(res, { item: adminService.setItemStatus(req.params.id, req.body.status) }, 'Status updated.')
 );
 
+// POST /api/admin/items/:id/reopen-claims — give a report another claiming period (body: { hours })
+router.post('/items/:id/reopen-claims', (req, res) =>
+  ok(res, { item: adminService.reopenClaiming(req.user, req.params.id, req.body.hours === undefined ? 24 : req.body.hours) }, 'Claiming reopened.')
+);
+
 // DELETE /api/admin/items/:id — remove a duplicate / inappropriate report (and its claims + photo)
 router.delete('/items/:id', (req, res) =>
   ok(res, itemService.removeReport(req.user, req.params.id), 'Report deleted.')

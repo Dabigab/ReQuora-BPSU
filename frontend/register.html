@@ -64,6 +64,17 @@
             <li data-rule="letter">One letter</li>
             <li data-rule="digit">One number</li>
           </ul>
+          <section class="terms-box-wrap" aria-labelledby="terms-heading">
+            <h2 id="terms-heading" class="terms-heading">Terms and Agreements</h2>
+            <p class="field-hint">Please read these before creating your account. <a href="terms.html" target="_blank" rel="noopener">Open in a new page</a></p>
+            <div class="terms-box" id="terms-box" tabindex="0" role="region" aria-label="Terms and Conditions and Rules and Regulations of ReQuora-BPSU"></div>
+          </section>
+          <div class="form-field check-field" id="terms-field">
+            <label class="check-label" for="acceptTerms">
+              <input type="checkbox" id="acceptTerms" name="acceptTerms" aria-describedby="err-acceptTerms">
+              <span>I have read and agree to the Terms and Conditions and Rules and Regulations of ReQuora-BPSU.</span>
+            </label>
+          </div>
           <button type="submit" class="btn btn-primary btn-block btn-lg" id="submit-btn">Create account</button>
         </form>
         <p class="form-footnote">Already have an account? <a href="login.html" id="to-login">Log in</a></p>
@@ -79,6 +90,7 @@
 <script src="js/ui.js"></script>
 <script src="js/modals.js"></script>
 <script src="js/components.js"></script>
+<script src="js/terms.js"></script>
 <script src="js/auth.js"></script>
 </body>
 </html>

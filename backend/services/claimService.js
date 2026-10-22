@@ -1,21 +1,32 @@
 /* ============================================================
    ReQuora — claim business rules
-   A claim is filed when a possible owner (for a found item) or a
-   possible finder (for a lost item) asks the BPSU Lost & Found Office
-   to look into an item, and books a visit to the office.
+   Many people can claim the same report. Filing a claim never closes
+   the report and never approves anyone: the office compares ALL the
+   claims after the 24-hour claiming period and approves exactly one.
 
-   Status flow (only the office can move a claim forward):
-     pending -> approved -> completed
-     pending -> rejected,  approved -> rejected,  rejected -> pending
-     pending -> cancelled   (by the person who filed it)
+   Claim status flow (only the office moves a claim forward):
+     pending -> under_review -> approved -> completed
+     pending / under_review -> info_required -> under_review (claimant answers)
+     pending / under_review / info_required -> rejected   (a reason is required)
+     approved -> rejected, rejected -> pending (the office reopens a claim)
+     pending / info_required -> cancelled   (by the person who submitted it)
+
+   "Only one approved claimant per report" holds because every check and
+   write below runs synchronously inside one Node process (no await
+   between the check and the write), and the database backs it up with a
+   unique index (supabase/migrations). Two admins pressing Approve at the
+   same moment are therefore handled one after the other: the second one
+   receives a conflict error.
    ============================================================ */
 
 const db = require('../utils/db');
 const notifications = require('./notificationService');
+const claimWindow = require('./claimWindowService');
 const { Errors } = require('../utils/http');
 const {
   CLAIM_STATUSES,
   CLAIM_TRANSITIONS,
+  CLAIM_ACTIVE,
   OPEN_STATUSES,
   OFFICE_TIMEZONE_OFFSET_MINUTES,
   OFFICE_OPEN_MINUTES,
@@ -72,9 +83,10 @@ function findClaimOr404(id) {
 }
 
 /* ------------------------------------------------------------
-   Filing a claim
+   Submitting a claim
    ------------------------------------------------------------ */
 function createClaim(user, body) {
+  claimWindow.sweepDeadlines();
   const fields = {};
 
   const itemId = clean(asString(body.itemId));
@@ -82,26 +94,35 @@ function createClaim(user, body) {
   const item = db.getItemById(itemId);
   if (!item) throw Errors.notFound('That item could not be found.');
 
-  if (user.role === 'admin') throw Errors.forbidden('Administrators review claims; they cannot file them.');
+  if (user.role === 'admin') throw Errors.forbidden('Administrators review claims; they cannot submit them.');
   if (item.reportedBy === user.id) {
-    throw Errors.conflict('You filed this report yourself, so you cannot claim it.');
+    throw Errors.conflict('You submitted this report yourself, so you cannot claim it.');
+  }
+  // Enforced on the server clock: a browser cannot extend the 24-hour period.
+  if (claimWindow.hasEnded(item) || ['awaiting_review', 'under_verification', 'no_valid_claim'].includes(item.status)) {
+    throw Errors.conflict('The 24-hour claiming period for this report has ended. The office is reviewing the claims it received.');
   }
   if (!OPEN_STATUSES.includes(item.status)) {
     throw Errors.conflict('This item can no longer be claimed because it is already being processed or has been closed.');
   }
 
   const proof = textField(fields, 'proofDescription', body.proofDescription, { label: 'Your explanation', ...LIMITS.proof, required: true });
+  const evidence = textField(fields, 'ownershipEvidence', body.ownershipEvidence, { label: 'Ownership evidence', max: LIMITS.ownershipEvidence.max });
   const contactInfo = textField(fields, 'contactInfo', body.contactInfo, { label: 'Contact info', max: LIMITS.contactInfo.max });
+  // A visit date is optional: the office books the hand-over after it decides.
   const appointmentDate = clean(asString(body.appointmentDate));
   const appointmentTime = clean(asString(body.appointmentTime));
-  const appointmentError = validateAppointment(appointmentDate, appointmentTime);
-  if (appointmentError) fields.appointment = appointmentError;
+  let appointmentError = null;
+  if (appointmentDate || appointmentTime) {
+    appointmentError = validateAppointment(appointmentDate, appointmentTime);
+    if (appointmentError) fields.appointment = appointmentError;
+  }
   throwIfInvalid(fields, appointmentError || 'Please check the highlighted fields.');
 
-  // One open claim per person per item.
-  const existing = db.getClaims({ itemId, claimantId: user.id }).find((c) => c.status === 'pending' || c.status === 'approved');
+  // One claim per person per report (a withdrawn claim does not count).
+  const existing = db.getClaims({ itemId, claimantId: user.id }).find((c) => c.status !== 'cancelled');
   if (existing) {
-    throw Errors.conflict('You already have an open claim on this item.', { claim: serializeClaim(existing, item, 'claimant') });
+    throw Errors.conflict('You already submitted a claim for this item.', { claim: serializeClaim(existing, item, 'claimant') });
   }
 
   const claim = db.createClaim({
@@ -114,23 +135,30 @@ function createClaim(user, body) {
     claimantEmail: user.email,
     contactInfo: contactInfo || null,
     proofDescription: proof,
-    appointmentDate,
-    appointmentTime,
+    ownershipEvidence: evidence || null,
+    appointmentDate: appointmentDate || null,
+    appointmentTime: appointmentTime || null,
     verificationTier: verificationTier(item.category),
   });
 
-  const isOwnership = claim.claimType === 'ownership';
+  const timed = !!item.claimDeadline;
+  notifications.notify(user.id, {
+    type: 'claim_submitted',
+    title: 'Claim Submitted',
+    message: `${item.title}: ${timed ? 'the office reviews every claim once the 24-hour claiming period ends.' : 'the office will review your claim.'}`,
+    link: 'dashboard.html#claims',
+  });
   notifications.notify(item.reportedBy, {
-    type: 'claim_filed',
-    title: isOwnership ? 'Someone claimed your report' : 'Someone says they found your item',
+    type: 'claim_received',
+    title: claim.claimType === 'ownership' ? 'Someone submitted a claim on your report' : 'Someone says they found your item',
     message: `${item.title}: the office will review it and verify in person.`,
     link: `item.html?id=${item.id}`,
   });
   notifications.notifyAdmins({
-    type: 'claim_filed',
+    type: 'claim_received',
     title: 'New claim to review',
-    message: `${user.name} filed a claim on "${item.title}".`,
-    link: 'admin.html#claims',
+    message: `${user.name} submitted a claim on "${item.title}".`,
+    link: `item.html?id=${item.id}`,
   });
   return serializeClaim(claim, item, 'claimant');
 }
@@ -139,22 +167,29 @@ function createClaim(user, body) {
    Reading
    ------------------------------------------------------------ */
 function listMine(user) {
+  claimWindow.sweepDeadlines();
   return db.getClaims({ claimantId: user.id }).map((c) => serializeClaim(c, db.getItemById(c.itemId), 'claimant'));
 }
 
 function listForItem(user, itemId) {
+  claimWindow.sweepDeadlines();
   if (!isUuid(itemId)) throw Errors.notFound('That report could not be found.');
   const item = db.getItemById(itemId);
   if (!item) throw Errors.notFound('That report could not be found.');
 
   const admin = user.role === 'admin';
   if (!admin && item.reportedBy !== user.id) {
-    throw Errors.forbidden('Only the person who filed this report or an administrator can see its claims.');
+    throw Errors.forbidden('Only the person who submitted this report or an administrator can see its claims.');
   }
-  return db.getClaims({ itemId }).map((c) => serializeClaim(c, item, admin ? 'admin' : 'reporter'));
+  // Oldest claim first, so the office compares them in the order they arrived.
+  return db
+    .getClaims({ itemId })
+    .reverse()
+    .map((c) => serializeClaim(c, item, admin ? 'admin' : 'reporter'));
 }
 
 function listAll(query) {
+  claimWindow.sweepDeadlines();
   const status = queryString(query.status);
   if (status && !CLAIM_STATUSES.includes(status)) {
     throw Errors.validation('Unknown claim status.', { status: 'Unknown status.' });
@@ -163,57 +198,104 @@ function listAll(query) {
 }
 
 /* ------------------------------------------------------------
-   Cancelling (by the claimant)
+   Withdrawing / answering (by the claimant)
    ------------------------------------------------------------ */
 function cancelClaim(user, id) {
   const claim = findClaimOr404(id);
   if (claim.claimantId !== user.id) throw Errors.forbidden('You can only cancel your own claims.');
-  if (claim.status !== 'pending') {
-    throw Errors.conflict('Only a claim that has not been reviewed yet can be cancelled. Please contact the office.');
+  if (!['pending', 'info_required'].includes(claim.status)) {
+    throw Errors.conflict('Only a claim that has not been decided yet can be cancelled. Please contact the office.');
   }
   const updated = db.updateClaim(claim.id, { status: 'cancelled' });
+  claimWindow.refreshReviewState(claim.itemId);
+  return serializeClaim(updated, db.getItemById(claim.itemId), 'claimant');
+}
+
+// The claimant answers the office's request for more evidence.
+function respondToInfoRequest(user, id, body) {
+  const claim = findClaimOr404(id);
+  if (claim.claimantId !== user.id) throw Errors.forbidden('You can only answer requests on your own claims.');
+  if (claim.status !== 'info_required') throw Errors.conflict('The office is not waiting for more information on this claim.');
+
+  const fields = {};
+  const response = textField(fields, 'response', body.response, { label: 'Your answer', ...LIMITS.infoResponse, required: true });
+  throwIfInvalid(fields);
+
+  const item = db.getItemById(claim.itemId);
+  const updated = db.updateClaim(claim.id, {
+    status: 'under_review',
+    infoResponse: response,
+    infoRespondedAt: new Date().toISOString(),
+    historyNote: 'Claimant sent the additional information.',
+  });
+  claimWindow.refreshReviewState(claim.itemId);
+  notifications.notifyAdmins({
+    type: 'claim_received',
+    title: 'Claimant answered your request',
+    message: `${claim.claimantName} sent more information for "${(item && item.title) || claim.itemTitle}".`,
+    link: `item.html?id=${claim.itemId}`,
+  });
   return serializeClaim(updated, db.getItemById(claim.itemId), 'claimant');
 }
 
 /* ------------------------------------------------------------
    The office's decision (admin only — enforced by the route AND here)
    ------------------------------------------------------------ */
-// Tells the claimant what the office decided.
+// Tells the claimant what the office decided. Never mentions other claimants.
 function notifyClaimant(claim, item) {
   const title = (item && item.title) || claim.itemTitle || 'your item';
+  const visit = claim.appointmentDate ? ` on ${claim.appointmentDate} at ${claim.appointmentTime}` : '';
   const copy = {
-    approved: ['Your claim was approved', `Bring your reference number and proof to the office on ${claim.appointmentDate} at ${claim.appointmentTime}.`],
-    rejected: ['Your claim was not approved', claim.officeNotes ? `Office notes: ${claim.officeNotes}` : 'Visit the office for details.'],
+    approved: ['Your claim was approved', `Bring your reference number and a valid ID to the Lost and Found Office${visit}.`],
+    rejected: ['Your claim was not approved', claim.officeNotes ? `Reason: ${claim.officeNotes}` : 'Visit the office for details.'],
     completed: ['Item handed over', `${title} has been released to you. Thank you for using ReQuora!`],
-    pending: ['Your claim is back under review', 'The office reopened your claim.'],
+    pending: ['Your claim is back in the queue', 'The office reopened your claim.'],
+    under_review: ['Your claim is under review', 'The office is comparing the evidence.'],
+    info_required: ['More information needed', claim.infoRequest || 'The office needs more evidence to continue.'],
   }[claim.status];
   if (!copy) return;
-  notifications.notify(claim.claimantId, { type: `claim_${claim.status}`, title: copy[0], message: `${title}: ${copy[1]}`, link: `item.html?id=${claim.itemId}` });
+  notifications.notify(claim.claimantId, { type: `claim_${claim.status}`, title: copy[0], message: `${title}: ${copy[1]}`, link: 'dashboard.html#claims' });
 }
 
 function decideClaim(admin, id, body) {
   if (!admin || admin.role !== 'admin') throw Errors.forbidden('Administrator access is required.');
+  claimWindow.sweepDeadlines();
 
   const claim = findClaimOr404(id);
   const item = db.getItemById(claim.itemId);
   const fields = {};
   const updates = {};
+  let next = null;
 
   if (body.status !== undefined) {
-    const next = clean(asString(body.status));
+    next = clean(asString(body.status));
     if (!CLAIM_STATUSES.includes(next) || next === 'cancelled') {
-      throw Errors.validation('Invalid claim status.', { status: 'Choose pending, approved, rejected or completed.' });
+      throw Errors.validation('Invalid claim status.', { status: 'Choose under review, more information, approved, rejected or completed.' });
     }
-    if (next !== claim.status) {
-      if (!CLAIM_TRANSITIONS[claim.status].includes(next)) {
-        throw Errors.conflict(`A ${claim.status} claim cannot be changed to ${next}.`);
-      }
-      updates.status = next;
-    }
+    if (next === claim.status) next = null;
+    else if (!CLAIM_TRANSITIONS[claim.status].includes(next)) {
+      throw Errors.conflict(`A ${claim.status.replace('_', ' ')} claim cannot be changed to ${next.replace('_', ' ')}.`);
+    } else updates.status = next;
   }
 
   if (body.officeNotes !== undefined) {
-    updates.officeNotes = textField(fields, 'officeNotes', body.officeNotes, { label: 'Office notes', max: LIMITS.officeNotes.max }) || null;
+    updates.officeNotes = textField(fields, 'officeNotes', body.officeNotes, { label: 'Reason / notes for the claimant', max: LIMITS.officeNotes.max }) || null;
+  }
+  if (body.adminNotes !== undefined) {
+    updates.adminNotes = textField(fields, 'adminNotes', body.adminNotes, { label: 'Private admin notes', max: LIMITS.adminNotes.max }) || null;
+  }
+
+  if (next === 'rejected' && !(updates.officeNotes !== undefined ? updates.officeNotes : claim.officeNotes)) {
+    fields.officeNotes = 'Please give a reason for rejecting this claim.';
+  }
+  if (next === 'info_required') {
+    const request = textField(fields, 'infoRequest', body.infoRequest, { label: 'Your question', ...LIMITS.infoRequest, required: true });
+    if (request) {
+      updates.infoRequest = request;
+      updates.infoRequestedAt = new Date().toISOString();
+      updates.infoResponse = null; // a new question invalidates the previous answer
+      updates.infoRespondedAt = null;
+    }
   }
 
   if (body.appointmentDate !== undefined || body.appointmentTime !== undefined) {
@@ -232,14 +314,25 @@ function decideClaim(admin, id, body) {
 
   if (updates.status) {
     if (!item) throw Errors.conflict('The report for this claim no longer exists.');
+    if (item.status === 'closed') throw Errors.conflict('This report is closed.');
 
-    if (updates.status === 'approved') {
-      const other = db.getClaims({ itemId: item.id, status: 'approved' }).find((c) => c.id !== claim.id);
-      if (other) throw Errors.conflict('Another claim on this item is already approved. Reject it first if you need to approve this one.');
-      if (['returned', 'closed'].includes(item.status)) throw Errors.conflict('This item is already returned or closed.');
+    const decided = db.getClaims({ itemId: item.id }).find((c) => c.id !== claim.id && (c.status === 'approved' || c.status === 'completed'));
+
+    if (['approved', 'completed'].includes(next) || (next === 'pending' && claim.status === 'rejected')) {
+      if (decided) throw Errors.conflict('Another claimant is already approved for this item. Reject that claim first if you need to choose someone else.');
     }
+    if (next === 'approved' || next === 'completed') {
+      // The deadline cannot be bypassed: no decision while claims can still arrive.
+      if (item.claimDeadline && !claimWindow.hasEnded(item)) {
+        throw Errors.conflict('The claiming period for this report is still open. Decide after it ends so every claimant is compared fairly.');
+      }
+      if (item.status === 'returned') throw Errors.conflict('This item is already returned.');
+    }
+    if (next === 'pending' && item.status === 'returned') throw Errors.conflict('This item is already returned.');
+
     updates.reviewedAt = new Date().toISOString();
     updates.reviewedBy = admin.id;
+    updates.decidedBy = admin.id;
   }
 
   const updated = db.updateClaim(claim.id, updates);
@@ -247,19 +340,42 @@ function decideClaim(admin, id, body) {
 
   // Keep the report's own status in step with the claim.
   if (updates.status && item) {
-    if (updates.status === 'approved') {
-      db.updateItem(item.id, { status: 'claimed' });
-    } else if (updates.status === 'completed') {
-      db.updateItem(item.id, { status: 'returned' });
-      const now = new Date().toISOString();
+    const now = updates.reviewedAt;
+    if (next === 'approved') {
+      db.updateItem(item.id, { status: 'claimed', approvedClaimId: claim.id, approvedAt: now });
+      // Exactly one claimant wins: everyone else still in the running is told, without any detail about the winner.
       for (const c of db.getClaims({ itemId: item.id })) {
-        if (c.id !== claim.id && (c.status === 'pending' || c.status === 'approved')) {
-          const auto = db.updateClaim(c.id, { status: 'rejected', reviewedAt: now, officeNotes: c.officeNotes || 'The item was returned to another claimant.' });
+        if (c.id !== claim.id && (CLAIM_ACTIVE.includes(c.status))) {
+          const auto = db.updateClaim(c.id, {
+            status: 'rejected',
+            reviewedAt: now,
+            reviewedBy: admin.id,
+            decidedBy: admin.id,
+            officeNotes: 'The office approved another claimant who showed stronger proof of ownership.',
+          });
           notifyClaimant(auto, item);
         }
       }
-    } else if (updates.status === 'rejected' && claim.status === 'approved' && item.status === 'claimed') {
-      db.updateItem(item.id, { status: item.type }); // back to a verified, claimable report
+      notifications.notify(item.reportedBy, {
+        type: 'report_status',
+        title: 'A claimant was approved',
+        message: `"${item.title}": please hand the item to the Lost and Found Office if you have not done so yet, so it can be released to its owner.`,
+        link: `item.html?id=${item.id}`,
+      });
+    } else if (next === 'completed') {
+      db.updateItem(item.id, { status: 'returned', resolvedAt: now });
+      notifications.notify(item.reportedBy, {
+        type: 'report_status',
+        title: 'Report resolved',
+        message: `"${item.title}" was handed over to its owner. Thank you for reporting it!`,
+        link: `item.html?id=${item.id}`,
+      });
+    } else if (claim.status === 'approved' && next === 'rejected' && item.status === 'claimed') {
+      // Approval withdrawn: back to the review queue (or to the plain report when it never had a deadline).
+      db.updateItem(item.id, { status: item.claimDeadline ? 'awaiting_review' : item.type, approvedClaimId: null, approvedAt: null });
+      claimWindow.refreshReviewState(item.id);
+    } else {
+      claimWindow.refreshReviewState(item.id);
     }
   }
 
@@ -274,5 +390,6 @@ module.exports = {
   listForItem,
   listAll,
   cancelClaim,
+  respondToInfoRequest,
   decideClaim,
 };

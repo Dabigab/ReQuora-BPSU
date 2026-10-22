@@ -81,6 +81,9 @@ async function start() {
   await seedAdmin();
   await db.flush(); // make sure the admin account is stored before serving
 
+  // Closes expired 24-hour claiming periods on the server, every minute, even if nobody has the site open.
+  require('./services/claimWindowService').startDeadlineJob();
+
   const app = createApp();
   const server = app.listen(PORT, () => {
     console.log(`ReQuora API running on http://localhost:${PORT}`);

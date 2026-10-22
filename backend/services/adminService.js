@@ -9,8 +9,10 @@ const { serializeItem, serializeClaim } = require('../utils/serialize');
 const { clean, asString } = require('../utils/validate');
 const itemService = require('./itemService');
 const notifications = require('./notificationService');
+const claimWindow = require('./claimWindowService');
 
-const ACTIVE_STATUSES = ['pending_verification', 'lost', 'found', 'claimed'];
+const ACTIVE_STATUSES = ['pending_verification', 'lost', 'found', 'claimed', 'awaiting_review', 'under_verification', 'no_valid_claim'];
+const CLAIMS_TO_REVIEW = ['pending', 'under_review', 'info_required'];
 
 // Numbers shown on the public home page. Counts only — nothing personal.
 function publicStats() {
@@ -39,6 +41,7 @@ function lastDays(count) {
 }
 
 function adminStats() {
+  claimWindow.sweepDeadlines();
   const { users, items, claims } = db.readDB();
 
   const byStatus = Object.fromEntries(ITEM_STATUSES.map((s) => [s, 0]));
@@ -70,6 +73,8 @@ function adminStats() {
     found: items.filter((i) => i.type === 'found').length,
     pendingVerification: byStatus.pending_verification,
     pendingClaims: claims.filter((c) => c.status === 'pending').length,
+    claimsToReview: claims.filter((c) => CLAIMS_TO_REVIEW.includes(c.status)).length,
+    awaitingReview: byStatus.awaiting_review + byStatus.under_verification,
     approvedClaims: claims.filter((c) => c.status === 'approved').length,
     returned: byStatus.returned,
     users: nonAdminUsers.length,
@@ -81,19 +86,20 @@ function adminStats() {
 
 // Admin list: every report, any status, with reporter + claim info for the office.
 function listItemsForAdmin(query) {
+  claimWindow.sweepDeadlines();
   const filters = itemService.parseFilters({ ...query, status: query.status || 'all' });
   const sorted = itemService.sortItems(db.getItems(filters), query.sort);
   const { slice, pagination } = itemService.paginate(sorted, query, 15);
 
   const usersById = new Map(db.listUsers().map((u) => [u.id, u]));
   const items = slice.map((i) => {
-    const claims = db.getClaims({ itemId: i.id });
+    const claims = db.getClaims({ itemId: i.id }).filter((c) => c.status !== 'cancelled');
     const reporter = usersById.get(i.reportedBy);
     return {
       ...serializeItem(i, { role: 'admin' }),
       reporterEmail: reporter ? reporter.email : null,
       claimsCount: claims.length,
-      pendingClaims: claims.filter((c) => c.status === 'pending').length,
+      pendingClaims: claims.filter((c) => CLAIMS_TO_REVIEW.includes(c.status)).length,
     };
   });
   return { items, pagination };
@@ -125,9 +131,15 @@ function setItemStatus(id, rawStatus) {
   notifications.notify(item.reportedBy, {
     type: 'report_status',
     title: 'Your report was updated',
-    message: `"${item.title}" is now marked as ${status.replace('_', ' ')}.`,
+    message: `"${item.title}" is now marked as ${status.replace(/_/g, ' ')}.`,
     link: `item.html?id=${item.id}`,
   });
+  return serializeItem(updated, { role: 'admin' });
+}
+
+// Administrative exception to the 24-hour rule: reopen a report for more claims.
+function reopenClaiming(admin, id, hours) {
+  const updated = claimWindow.reopenClaiming(admin, id, hours);
   return serializeItem(updated, { role: 'admin' });
 }
 
@@ -161,6 +173,7 @@ module.exports = {
   listItemsForAdmin,
   verifyItem,
   setItemStatus,
+  reopenClaiming,
   listUsers,
   recentClaims,
 };

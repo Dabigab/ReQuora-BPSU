@@ -36,7 +36,7 @@ async function loadStats() {
       statCard('search', 'My Lost Reports', lost, 'tone-lost') +
       statCard('check', 'My Found Reports', found, 'tone-found') +
       statCard('shield', 'My Claims', myClaims.length, 'tone-claim') +
-      statCard('award', 'Returned Items', returned + claimsReturned, 'tone-returned');
+      statCard('award', 'Resolved Items', returned + claimsReturned, 'tone-returned');
     return true;
   } catch (err) {
     box.innerHTML = `<div class="grid-span">${errorState(err, { retryId: 'retry-stats' })}</div>`;
@@ -46,11 +46,40 @@ async function loadStats() {
   }
 }
 
-/* ---------- My reports ---------- */
+/* ---------- My Reports (items I reported — as the finder, or as the owner of a lost item) ---------- */
+
+// Where the report stands, in plain words.
+function reportStateText(item) {
+  if (item.type === 'lost') {
+    if (item.status === 'returned') return 'Resolved: your item was returned to you.';
+    if (item.status === 'closed') return 'This report is closed.';
+    return item.claimsCount
+      ? `Someone says they found your item. The office is checking (${item.claimsCount} message${item.claimsCount === 1 ? '' : 's'}).`
+      : 'Your lost-item report is live. We will tell you if someone finds it.';
+  }
+  if (isOpenForClaims(item)) return 'Open for claims: people who think the item is theirs can submit a claim until the countdown ends.';
+  return (
+    {
+      pending_verification: 'Waiting for the office to look at your report.',
+      found: 'Your report is live.',
+      awaiting_review: 'The claiming period ended. The office is reviewing the claims it received.',
+      under_verification: 'The office is checking the claimants’ evidence.',
+      claimed: 'The office approved a claimant. Please make sure the item is at the Lost and Found Office so it can be handed over.',
+      returned: 'Resolved: the item was handed over to its owner. Thank you!',
+      no_valid_claim: 'No valid claim was received. The office will decide what happens next.',
+      closed: 'This report is closed.',
+    }[item.status] || ''
+  );
+}
+
 function reportRowHtml(item) {
-  const open = OPEN.includes(item.status);
+  const open = OPEN.includes(item.status) && !item.claimsCount; // with claims waiting, only the office can close it
+  const finder = item.type === 'found';
+  const claimsLine = item.claimsCount
+    ? `<span class="badge badge-pending">${item.claimsCount} ${item.type === 'found' ? 'claimant' : 'claim'}${item.claimsCount === 1 ? '' : 's'}</span>`
+    : '';
   return `
-    <article class="row-card" data-id="${escapeHtml(item.id)}">
+    <article class="row-card row-card-report" data-id="${escapeHtml(item.id)}">
       <a class="row-media" href="${escapeHtml(itemUrl(item.id))}" data-item-id="${escapeHtml(item.id)}" tabindex="-1" aria-hidden="true">
         ${
           item.imageUrl
@@ -59,11 +88,12 @@ function reportRowHtml(item) {
         }
       </a>
       <div class="row-main">
-        <div class="badge-row">${itemBadges(item)}${
-          item.pendingClaims ? `<span class="badge badge-pending">${item.pendingClaims} pending claim${item.pendingClaims === 1 ? '' : 's'}</span>` : ''
-        }</div>
+        <div class="badge-row">${itemBadges(item)}${claimsLine}${isOpenForClaims(item) ? countdownHtml(item) : ''}</div>
         <h3><a href="${escapeHtml(itemUrl(item.id))}" data-item-id="${escapeHtml(item.id)}">${escapeHtml(item.title)}</a></h3>
-        <p class="muted">${icon('pin', 14)} ${escapeHtml(item.location)} · ${icon('calendar', 14)} ${escapeHtml(formatDate(item.date))} · ${escapeHtml(item.reference)}</p>
+        <p class="muted">${icon('tag', 14)} ${escapeHtml(item.category)} · ${icon('pin', 14)} ${escapeHtml(item.location)} · ${icon('calendar', 14)} ${finder ? 'Found' : 'Lost'} ${escapeHtml(formatDate(item.date))}</p>
+        <p class="row-desc">${escapeHtml(item.description)}</p>
+        <p class="muted">Published ${escapeHtml(formatDateTime(item.createdAt))} · ${escapeHtml(item.reference)}</p>
+        <p class="note-inline">${icon('info', 14)} <span>${escapeHtml(reportStateText(item))}</span></p>
       </div>
       <div class="row-actions">
         <a class="btn btn-outline btn-sm" href="${escapeHtml(itemUrl(item.id))}" data-item-id="${escapeHtml(item.id)}">View</a>
@@ -84,12 +114,13 @@ async function loadReports() {
       panel.innerHTML = stateBlock({
         iconName: 'file',
         title: 'No reports yet',
-        text: 'Lost or found something on campus? File a report and the office will help.',
-        actionHtml: '<a class="btn btn-primary btn-sm" href="report.html">Report an item</a>',
+        text: 'Lost or found something on campus? Report it and the office will help.',
+        actionHtml: '<a class="btn btn-primary btn-sm" href="report.html">Report an Item</a>',
       });
       return;
     }
-    panel.innerHTML = `<div class="list-stack">${data.items.map(reportRowHtml).join('')}</div><div id="reports-pagination"></div>`;
+    panel.innerHTML = `<p class="muted tab-intro">Items you reported. If you found an item, you are the finder: you do not claim it, the owner does.</p><div class="list-stack">${data.items.map(reportRowHtml).join('')}</div><div id="reports-pagination"></div>`;
+    startCountdowns(loadReports);
     renderPagination(el('reports-pagination'), data.pagination, (n) => {
       reportsPage = n;
       loadReports();
@@ -143,19 +174,52 @@ function wireReportActions(panel) {
 }
 
 /* ---------- My claims ---------- */
+// What the claim status means for the claimant.
+const CLAIM_STATE_TEXT = {
+  pending: 'Your claim was received. The office compares all claims once the 24-hour claiming period ends.',
+  under_review: 'The office is comparing the evidence.',
+  info_required: 'The office needs more information from you. Please answer below.',
+  approved: 'Approved! Bring your reference number and a valid ID to the Lost and Found Office to collect the item.',
+  rejected: 'The office could not approve this claim. See the reason below.',
+  completed: 'The item was handed over to you. Thank you for using ReQuora!',
+  cancelled: 'You cancelled this claim.',
+};
+
 function claimRowHtml(c) {
+  const visit = c.appointmentDate ? ` · ${icon('calendar', 14)} Visit ${escapeHtml(formatDate(c.appointmentDate))} at ${escapeHtml(formatTime12(c.appointmentTime))}` : '';
   return `
-    <article class="row-card">
+    <article class="row-card row-card-claim">
+      <a class="row-media" href="${escapeHtml(itemUrl(c.itemId))}" data-item-id="${escapeHtml(c.itemId)}" tabindex="-1" aria-hidden="true">
+        ${c.itemImageUrl ? `<img src="${escapeHtml(photoUrl(c.itemImageUrl))}" alt="" loading="lazy">` : icon(CATEGORY_ICONS[c.itemCategory] || 'box', 28)}
+      </a>
       <div class="row-main">
         <div class="badge-row">${claimBadge(c.status)}${c.itemStatus ? statusBadge(c.itemStatus) : ''}</div>
         <h3><a href="${escapeHtml(itemUrl(c.itemId))}" data-item-id="${escapeHtml(c.itemId)}">${escapeHtml(c.itemTitle)}</a></h3>
-        <p class="muted">${icon('calendar', 14)} ${escapeHtml(formatDate(c.appointmentDate))} at ${escapeHtml(formatTime12(c.appointmentTime))} · ${escapeHtml(c.reference)}</p>
+        <p class="muted">${icon('tag', 14)} ${escapeHtml(c.itemCategory || '')} · ${icon('pin', 14)} ${escapeHtml(c.itemLocation || '—')} · ${icon('calendar', 14)} ${c.itemType === 'lost' ? 'Lost' : 'Found'} ${escapeHtml(formatDate(c.itemDate))}</p>
+        <p class="muted">Claim Submitted ${escapeHtml(formatDateTime(c.createdAt))} · ${escapeHtml(c.reference)}${visit}</p>
+        <p class="note-inline">${icon('info', 14)} <span>${escapeHtml(CLAIM_STATE_TEXT[c.status] || '')}</span></p>
         ${claimTimelineHtml(c)}
+        <details class="evidence"><summary>My explanation and evidence</summary>
+          <p><strong>Why it is mine:</strong> ${multiline(c.proofDescription)}</p>
+          ${c.ownershipEvidence ? `<p><strong>Identifying details:</strong> ${multiline(c.ownershipEvidence)}</p>` : ''}
+          ${c.infoRequest ? `<p><strong>Office question:</strong> ${multiline(c.infoRequest)}</p>` : ''}
+          ${c.infoResponse ? `<p><strong>My answer:</strong> ${multiline(c.infoResponse)}</p>` : ''}
+        </details>
         ${c.officeNotes ? `<p class="note-inline">${icon('info', 14)} <span>Office: ${escapeHtml(c.officeNotes)}</span></p>` : ''}
+        ${
+          c.status === 'info_required'
+            ? `<form class="respond-form" data-respond="${escapeHtml(c.id)}" novalidate>
+                 <p class="note-inline">${icon('alert', 14)} <span><strong>The office asks:</strong> ${escapeHtml(c.infoRequest || 'Please send more evidence.')}</span></p>
+                 <div class="form-field"><label for="resp-${escapeHtml(c.id)}">Your answer</label>
+                 <textarea id="resp-${escapeHtml(c.id)}" name="response" rows="3" maxlength="1000" required></textarea></div>
+                 <button type="submit" class="btn btn-primary btn-sm">Send answer</button>
+               </form>`
+            : ''
+        }
       </div>
       <div class="row-actions">
         <a class="btn btn-outline btn-sm" href="${escapeHtml(itemUrl(c.itemId))}" data-item-id="${escapeHtml(c.itemId)}">View item</a>
-        ${c.status === 'pending' ? `<button type="button" class="btn btn-ghost btn-sm" data-cancel-claim="${escapeHtml(c.id)}">Cancel claim</button>` : ''}
+        ${['pending', 'info_required'].includes(c.status) ? `<button type="button" class="btn btn-ghost btn-sm" data-cancel-claim="${escapeHtml(c.id)}">Cancel claim</button>` : ''}
       </div>
     </article>`;
 }
@@ -166,17 +230,39 @@ function renderClaims() {
     panel.innerHTML = stateBlock({
       iconName: 'shield',
       title: 'No claims yet',
-      text: 'When you claim an item you recognise, you can follow its progress here.',
+      text: 'When you believe a reported item is yours, you can submit a claim and follow it here.',
       actionHtml: '<a class="btn btn-primary btn-sm" href="browse.html?type=found">Browse found items</a>',
     });
     return;
   }
-  panel.innerHTML = `<div class="list-stack">${myClaims.map(claimRowHtml).join('')}</div>`;
+  panel.innerHTML = `<p class="muted tab-intro">Items you say belong to you. Only you and the office can see the evidence you submitted.</p><div class="list-stack">${myClaims.map(claimRowHtml).join('')}</div>`;
+  panel.querySelectorAll('[data-respond]').forEach((form) =>
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearFieldErrors(form);
+      const response = form.elements.response.value.trim();
+      if (response.length < 5) {
+        showFieldErrors(form, { response: 'Please write at least 5 characters.' });
+        return;
+      }
+      const btn = form.querySelector('button[type="submit"]');
+      setLoading(btn, true, 'Sending…');
+      try {
+        await apiRequest(`/claims/${form.dataset.respond}/respond`, { method: 'PUT', auth: true, body: { response } });
+        toast('Thank you. The office has your answer.');
+        await refreshAll();
+      } catch (err) {
+        setLoading(btn, false);
+        const orphan = showFieldErrors(form, err.fields);
+        if (orphan.length || !err.fields || !Object.keys(err.fields).length) toast(orphan[0] || err.message, 'error');
+      }
+    })
+  );
   panel.querySelectorAll('[data-cancel-claim]').forEach((btn) =>
     btn.addEventListener('click', async () => {
       const yes = await confirmDialog({
         title: 'Cancel your claim?',
-        message: 'The office will no longer expect you on your appointment day.',
+        message: 'The office will no longer consider your claim. You can submit a new one while the claiming period is still open.',
         confirmText: 'Cancel claim',
         cancelText: 'Keep claim',
         danger: true,
@@ -202,7 +288,7 @@ async function renderActivity() {
     const events = [];
     data.items.forEach((i) => events.push({ at: i.createdAt, icon: i.type === 'lost' ? 'search' : 'check', text: `You reported a ${i.type} item: ${i.title}`, href: itemUrl(i.id), id: i.id }));
     myClaims.forEach((c) => {
-      events.push({ at: c.createdAt, icon: 'shield', text: `You filed a claim for ${c.itemTitle}`, href: itemUrl(c.itemId), id: c.itemId });
+      events.push({ at: c.createdAt, icon: 'shield', text: `You submitted a claim for ${c.itemTitle}`, href: itemUrl(c.itemId), id: c.itemId });
       if (c.updatedAt && c.status !== 'pending' && c.updatedAt !== c.createdAt) {
         events.push({ at: c.updatedAt, icon: c.status === 'rejected' ? 'xCircle' : 'checkCircle', text: `Your claim for ${c.itemTitle} is now ${claimStatusLabel(c.status).toLowerCase()}`, href: itemUrl(c.itemId), id: c.itemId });
       }
@@ -335,6 +421,10 @@ function selectTab(name, { focus = false } = {}) {
     if (on && focus) tab.focus();
   });
   window.history.replaceState(null, '', `#${name}`);
+  // Highlight "My Reports" / "My Claims" in the main menu to match the open tab.
+  document.querySelectorAll('[data-nav="my-reports"], [data-nav="my-claims"]').forEach((a) => a.removeAttribute('aria-current'));
+  const navLink = document.querySelector(`[data-nav="my-${name}"]`);
+  if (navLink) navLink.setAttribute('aria-current', 'page');
   if (name === 'claims') renderClaims();
   if (name === 'activity') renderActivity();
   if (name === 'profile' && !loaded.profile) {
@@ -376,7 +466,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   el('welcome').textContent = `Welcome, ${user.name.split(' ')[0]}`;
   wireTabs();
+  // Menu links ("My Reports", "My Claims") only change the #hash while this page is open.
+  window.addEventListener('hashchange', () => {
+    const name = window.location.hash.replace('#', '');
+    if (TABS.includes(name)) selectTab(name);
+  });
   const initial = window.location.hash.replace('#', '');
   await refreshAll();
-  if (TABS.includes(initial) && initial !== 'reports') selectTab(initial);
+  selectTab(TABS.includes(initial) ? initial : 'reports');
 });

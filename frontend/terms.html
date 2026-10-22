@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms and Conditions — ReQuora</title>
+<meta name="description" content="The proposed Terms and Conditions and Rules and Regulations of ReQuora-BPSU.">
+<meta name="theme-color" content="#5e1020">
+<link rel="icon" type="image/png" href="assets/bpsu-logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Source+Serif+4:wght@600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body class="page-terms">
+<div id="site-header"></div>
+
+<main>
+  <section class="page-hero compact">
+    <div class="container">
+      <p class="eyebrow">ReQuora-BPSU</p>
+      <h1>Terms and Conditions and Rules and Regulations</h1>
+      <p>Please read these before creating an account.</p>
+    </div>
+  </section>
+  <div class="container section tight">
+    <article class="card terms-page" id="terms-root"></article>
+    <p class="form-footnote"><a href="register.html">Back to sign up</a></p>
+  </div>
+</main>
+
+<div id="site-footer"></div>
+
+<script src="js/config.js"></script>
+<script src="js/api.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/modals.js"></script>
+<script src="js/components.js"></script>
+<script src="js/terms.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    initLayout();
+    document.getElementById('terms-root').innerHTML = termsContentHtml();
+  });
+</script>
+</body>
+</html>

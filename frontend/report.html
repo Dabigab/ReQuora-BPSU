@@ -108,6 +108,11 @@
           <input type="text" id="contactInfo" name="contactInfo" maxlength="120" placeholder="Phone number or alternate email" autocomplete="off">
           <small class="field-hint">Private: only the office and people with an approved claim can see this.</small>
         </div>
+        <div class="form-field" id="hint-field" hidden>
+          <label for="verificationHint">Private verification detail <span class="optional">(optional)</span></label>
+          <textarea id="verificationHint" name="verificationHint" rows="2" maxlength="500" placeholder="Something only the real owner would know, for example what is inside or a mark that is not visible in the photo"></textarea>
+          <small class="field-hint">Private: shown only to you and the office, never to the public or to claimants. The office uses it to check who the real owner is.</small>
+        </div>
       </section>
 
       <div class="form-submit">

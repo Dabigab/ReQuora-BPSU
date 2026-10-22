@@ -12,7 +12,7 @@ const db = require('../utils/db');
 const itemService = require('../services/itemService');
 const claimService = require('../services/claimService');
 const adminService = require('../services/adminService');
-const { weekdayFromNow, saturdayFromNow, todayStr, daysFromToday, validReport, uuid } = require('./helpers');
+const { weekdayFromNow, saturdayFromNow, todayStr, daysFromToday, validReport, uuid, endClaimingPeriod } = require('./helpers');
 
 let maria; // student who files reports
 let juan; // another student (claimant)
@@ -131,6 +131,7 @@ describe('reading and privacy', () => {
     assert.equal(itemService.getItemForViewer(created.id, juan).item.contactInfo, undefined);
 
     const claim = claimService.createClaim(juan, claimBody(created.id));
+    endClaimingPeriod(created.id);
     claimService.decideClaim(admin, claim.id, { status: 'approved' });
     assert.equal(itemService.getItemForViewer(created.id, juan).item.contactInfo, '0917-111-2222');
   });
@@ -230,14 +231,24 @@ describe('editing, closing and deleting reports', () => {
   test('an owner cannot edit or delete once the office is processing the report', () => {
     const item = itemService.createReport(maria, validReport({ type: 'found' }), null);
     const claim = claimService.createClaim(juan, claimBody(item.id));
+    endClaimingPeriod(item.id);
     claimService.decideClaim(admin, claim.id, { status: 'approved' });
     throwsApi(() => itemService.updateReport(maria, item.id, { title: 'Sneaky edit' }), 409);
     throwsApi(() => itemService.removeReport(maria, item.id), 409);
   });
 
+  test('an owner cannot close or delete a report while claims are waiting on it', () => {
+    const item = itemService.createReport(maria, validReport({ type: 'found' }), null);
+    claimService.createClaim(juan, claimBody(item.id));
+    throwsApi(() => itemService.updateReport(maria, item.id, { status: 'closed' }), 409);
+    throwsApi(() => itemService.removeReport(maria, item.id), 409);
+    assert.equal(db.getItemById(item.id).status, 'pending_verification');
+  });
+
   test('admins can edit and set any valid status, but lost/found must match the report type', () => {
     const item = itemService.createReport(maria, validReport({ type: 'lost' }), null);
-    assert.equal(itemService.updateReport(admin, item.id, { status: 'claimed' }).status, 'claimed');
+    assert.equal(itemService.updateReport(admin, item.id, { status: 'under_verification' }).status, 'under_verification');
+    throwsApi(() => itemService.updateReport(admin, item.id, { status: 'claimed' }), 409); // needs an approved claim
     throwsApi(() => itemService.updateReport(admin, item.id, { status: 'found' }), 400);
     throwsApi(() => itemService.updateReport(admin, item.id, { status: 'banana' }), 400);
     assert.equal(itemService.updateReport(admin, item.id, { status: 'lost' }).status, 'lost');
@@ -247,7 +258,7 @@ describe('editing, closing and deleting reports', () => {
     const item = itemService.createReport(maria, validReport({ type: 'found' }), null);
     claimService.createClaim(juan, claimBody(item.id));
     assert.equal(db.getClaims({ itemId: item.id }).length, 1);
-    itemService.removeReport(maria, item.id);
+    itemService.removeReport(admin, item.id);
     assert.equal(db.getItemById(item.id), undefined);
     assert.equal(db.getClaims({ itemId: item.id }).length, 0);
   });
@@ -352,6 +363,7 @@ describe('claims', () => {
 
     // after cancelling, the person may file again
     const again = claimService.createClaim(juan, claimBody(found.id));
+    endClaimingPeriod(found.id);
     claimService.decideClaim(admin, again.id, { status: 'approved' });
     throwsApi(() => claimService.cancelClaim(juan, again.id), 409);
   });
@@ -374,32 +386,36 @@ describe('the office review of claims', () => {
   });
 
   test('approving a claim marks the report as claimed', () => {
+    endClaimingPeriod(found.id);
     const updated = claimService.decideClaim(admin, claim.id, { status: 'approved', officeNotes: 'ID checked' });
     assert.equal(updated.status, 'approved');
     assert.equal(updated.officeNotes, 'ID checked');
     assert.equal(db.getItemById(found.id).status, 'claimed');
   });
 
-  test('completing a claim returns the report and rejects other open claims', () => {
+  test('completing a claim returns the report; the other claimants were already turned down at approval', () => {
     const other = makeUser('Third Person', 'third@bpsu.edu.ph');
     const second = claimService.createClaim(other, claimBody(found.id));
+    endClaimingPeriod(found.id);
     claimService.decideClaim(admin, claim.id, { status: 'approved' });
+    assert.equal(db.getClaimById(second.id).status, 'rejected');
     claimService.decideClaim(admin, claim.id, { status: 'completed' });
     assert.equal(db.getItemById(found.id).status, 'returned');
-    assert.equal(db.getClaimById(second.id).status, 'rejected');
   });
 
   test('only one claim per item can be approved at a time', () => {
     const other = makeUser('Third Person', 'third@bpsu.edu.ph');
     const second = claimService.createClaim(other, claimBody(found.id));
+    endClaimingPeriod(found.id);
     claimService.decideClaim(admin, claim.id, { status: 'approved' });
     throwsApi(() => claimService.decideClaim(admin, second.id, { status: 'approved' }), 409);
   });
 
-  test('rejecting an approved claim puts the report back to its active status', () => {
+  test('rejecting the approved claim sends the report back to the office queue', () => {
+    endClaimingPeriod(found.id);
     claimService.decideClaim(admin, claim.id, { status: 'approved' });
-    claimService.decideClaim(admin, claim.id, { status: 'rejected' });
-    assert.equal(db.getItemById(found.id).status, 'found');
+    claimService.decideClaim(admin, claim.id, { status: 'rejected', officeNotes: 'Could not collect it.' });
+    assert.equal(db.getItemById(found.id).status, 'no_valid_claim'); // nobody else is left in the running
   });
 
   test('invalid jumps are refused', () => {
@@ -421,6 +437,7 @@ describe('the office review of claims', () => {
 
     const found2 = itemService.createReport(maria, validReport({ type: 'found', title: 'Second found item' }), null);
     const c2 = claimService.createClaim(juan, claimBody(found2.id));
+    endClaimingPeriod(found2.id);
     claimService.decideClaim(admin, c2.id, { status: 'approved' });
     adminService.setItemStatus(found2.id, 'returned');
     assert.equal(db.getClaimById(c2.id).status, 'completed');

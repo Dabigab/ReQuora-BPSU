@@ -38,4 +38,12 @@ const validReport = (overrides = {}) => ({
 
 const uuid = () => crypto.randomUUID();
 
-module.exports = { weekdayFromNow, saturdayFromNow, todayStr, daysFromToday, validReport, uuid };
+// Pretends the 24-hour claiming period of a found-item report has just run out, then runs the
+// server's sweep (the same code the once-a-minute job runs). Requires utils/db to be loaded already.
+function endClaimingPeriod(itemId) {
+  const db = require('../utils/db');
+  db.updateItem(itemId, { claimDeadline: new Date(Date.now() - 1000).toISOString() });
+  return require('../services/claimWindowService').sweepDeadlines();
+}
+
+module.exports = { weekdayFromNow, saturdayFromNow, todayStr, daysFromToday, validReport, uuid, endClaimingPeriod };

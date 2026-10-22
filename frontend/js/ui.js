@@ -149,13 +149,18 @@ const ITEM_STATUS_META = {
   pending_verification: { label: 'Pending Verification', icon: 'clock', tone: 'pending' },
   lost: { label: 'Lost', icon: 'search', tone: 'lost' },
   found: { label: 'Found', icon: 'check', tone: 'found' },
-  claimed: { label: 'Claimed', icon: 'award', tone: 'claimed' },
-  returned: { label: 'Returned', icon: 'checkCircle', tone: 'returned' },
+  claimed: { label: 'Claim Approved', icon: 'award', tone: 'claimed' },
+  returned: { label: 'Resolved', icon: 'checkCircle', tone: 'returned' },
   closed: { label: 'Closed', icon: 'xCircle', tone: 'closed' },
+  awaiting_review: { label: 'Awaiting Admin Review', icon: 'clock', tone: 'pending' },
+  under_verification: { label: 'Under Verification', icon: 'shield', tone: 'claimed' },
+  no_valid_claim: { label: 'No Valid Claim', icon: 'xCircle', tone: 'closed' },
 };
 
 const CLAIM_STATUS_META = {
   pending: { label: 'Pending', icon: 'clock', tone: 'pending' },
+  under_review: { label: 'Under Review', icon: 'eye', tone: 'claimed' },
+  info_required: { label: 'Additional Information Required', icon: 'alert', tone: 'pending' },
   approved: { label: 'Approved', icon: 'check', tone: 'found' },
   rejected: { label: 'Rejected', icon: 'xCircle', tone: 'lost' },
   completed: { label: 'Completed', icon: 'checkCircle', tone: 'returned' },
@@ -176,7 +181,11 @@ const typeBadge = (type) =>
 
 // Type + status badges, without repeating "Lost Lost" / "Found Found":
 // when the status just restates the type, one badge is enough.
-const itemBadges = (item) => typeBadge(item.type) + (item.status === item.type ? '' : statusBadge(item.status));
+// A found report whose 24-hour claiming period is running reads "Open for Claims".
+const openForClaimsBadge = () => `<span class="badge badge-found">${icon('clock', 13)}<span>Open for Claims</span></span>`;
+const isOpenForClaims = (item) => !!item.claimDeadline && item.claimsOpen !== false && ['pending_verification', 'found', 'lost'].includes(item.status);
+const itemBadges = (item) =>
+  typeBadge(item.type) + (isOpenForClaims(item) ? openForClaimsBadge() : item.status === item.type ? '' : statusBadge(item.status));
 
 const statusLabel = (status) => (ITEM_STATUS_META[status] ? ITEM_STATUS_META[status].label : status);
 const claimStatusLabel = (status) => (CLAIM_STATUS_META[status] ? CLAIM_STATUS_META[status].label : status);
@@ -319,9 +328,59 @@ function itemCardHtml(item) {
     </article>`;
 }
 
+/* ---------- The 24-hour claiming period ---------- */
+// "23h 12m left", "45 minutes left", or "Claiming period ended". The deadline comes from the server;
+// the item's serverTime is used to cancel out a wrong clock on this device.
+function formatRemaining(ms) {
+  if (ms <= 0) return 'Claiming period ended';
+  const totalMin = Math.ceil(ms / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h >= 1) return `${h}h ${String(m).padStart(2, '0')}m left`;
+  return `${m} minute${m === 1 ? '' : 's'} left`;
+}
+
+function countdownHtml(item) {
+  if (!item || !item.claimDeadline) return '';
+  const offset = item.serverTime ? new Date(item.serverTime).getTime() - Date.now() : 0;
+  const left = new Date(item.claimDeadline).getTime() - (Date.now() + offset);
+  const open = ['pending_verification', 'found', 'lost'].includes(item.status);
+  if (!open || left <= 0) return `<span class="countdown ended">${icon('clock', 14)}<span>Claiming period ended</span></span>`;
+  return `<span class="countdown" data-deadline="${escapeHtml(item.claimDeadline)}" data-offset="${offset}">${icon('clock', 14)}<span>${escapeHtml(formatRemaining(left))}</span></span>`;
+}
+
+let countdownTimer = null;
+// Keeps every countdown on the page ticking. When one runs out, the page can refresh itself via onEnded.
+function startCountdowns(onEnded) {
+  if (countdownTimer) clearInterval(countdownTimer);
+  const tick = () => {
+    let ended = false;
+    document.querySelectorAll('.countdown[data-deadline]').forEach((el) => {
+      const left = new Date(el.dataset.deadline).getTime() - (Date.now() + Number(el.dataset.offset || 0));
+      el.querySelector('span').textContent = formatRemaining(left);
+      if (left <= 0) {
+        el.classList.add('ended');
+        el.removeAttribute('data-deadline');
+        ended = true;
+      }
+    });
+    if (ended && typeof onEnded === 'function') onEnded();
+  };
+  countdownTimer = setInterval(tick, 15000);
+  tick();
+}
+
 /* ---------- Claim progress ---------- */
-const CLAIM_STEP_LABEL = { pending: 'Claim filed', approved: 'Approved', rejected: 'Not approved', completed: 'Item handed over', cancelled: 'Cancelled' };
-const CLAIM_NEXT = { pending: ['approved', 'completed'], approved: ['completed'] };
+const CLAIM_STEP_LABEL = {
+  pending: 'Claim Submitted',
+  under_review: 'Under review',
+  info_required: 'More information needed',
+  approved: 'Approved',
+  rejected: 'Not approved',
+  completed: 'Item handed over',
+  cancelled: 'Cancelled',
+};
+const CLAIM_NEXT = { pending: ['approved', 'completed'], under_review: ['approved', 'completed'], info_required: ['under_review'], approved: ['completed'] };
 
 // Horizontal progress track built from claim.timeline (the server's real history).
 // Finished steps show their date, the current one is highlighted, and the steps
@@ -332,7 +391,7 @@ function claimTimelineHtml(claim) {
   const last = history[history.length - 1].status;
   const steps = history.map((s, i) => ({
     ...s,
-    label: i > 0 && s.status === 'pending' ? 'Reopened for review' : CLAIM_STEP_LABEL[s.status] || s.status,
+    label: i > 0 && s.status === 'pending' ? 'Reopened' : CLAIM_STEP_LABEL[s.status] || s.status,
     state: i === history.length - 1 ? 'current' : 'done',
   }));
   (CLAIM_NEXT[last] || []).forEach((status) => steps.push({ status, label: CLAIM_STEP_LABEL[status], state: 'upcoming', at: null, note: null }));

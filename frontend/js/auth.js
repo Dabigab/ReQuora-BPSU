@@ -75,6 +75,8 @@ function initLogin(form) {
 
 function initRegister(form) {
   wirePasswordRules();
+  byId('terms-box').innerHTML = termsContentHtml();
+  byId('acceptTerms').addEventListener('change', () => clearFieldErrors(form));
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     clearFieldErrors(form);
@@ -87,11 +89,15 @@ function initRegister(form) {
     if (!Object.values(PASSWORD_RULES).every((rule) => rule(password))) {
       errors.password = 'Use 8 to 72 characters with at least one letter and one number.';
     }
+    // The server checks this again; the browser check just saves a round trip.
+    if (!byId('acceptTerms').checked) {
+      errors.acceptTerms = 'Please tick the box to confirm you have read and agree to the Terms and Conditions.';
+    }
     if (Object.keys(errors).length) {
       showFieldErrors(form, errors);
       return;
     }
-    const payload = { name, email, password, role: byId('role').value };
+    const payload = { name, email, password, role: byId('role').value, acceptTerms: true };
     const studentId = byId('studentId').value.trim();
     if (studentId) payload.studentId = studentId;
     submitAuth(form, '/auth/register', payload, 'Creating account…');

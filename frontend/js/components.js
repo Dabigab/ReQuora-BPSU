@@ -30,7 +30,10 @@ function headerHtml(user) {
     ['home', 'index.html', 'Home'],
     ['browse', 'browse.html', 'Browse'],
   ];
-  if (user) nav.push(['dashboard', 'dashboard.html', 'My Dashboard']);
+  if (user) {
+    nav.push(['my-reports', 'dashboard.html#reports', 'My Reports']);
+    nav.push(['my-claims', 'dashboard.html#claims', 'My Claims']);
+  }
   if (user && user.role === 'admin') nav.push(['admin', 'admin.html', 'Admin']);
 
   const links = nav.map(([key, href, label]) => `<a href="${href}" data-nav="${key}">${label}</a>`).join('');
@@ -90,7 +93,9 @@ function footerHtml() {
             <li><a href="browse.html">Browse Lost &amp; Found</a></li>
             <li><a href="report.html?type=lost">Report a lost item</a></li>
             <li><a href="report.html?type=found">Report a found item</a></li>
-            <li><a href="dashboard.html">My dashboard</a></li>
+            <li><a href="dashboard.html#reports">My Reports</a></li>
+            <li><a href="dashboard.html#claims">My Claims</a></li>
+            <li><a href="terms.html">Terms and Conditions</a></li>
           </ul>
         </div>
         <div>
@@ -138,13 +143,18 @@ function wireNavToggle() {
 
 /* ---------- Notification bell ---------- */
 const NOTIF_ICONS = {
-  claim_filed: 'shield',
+  claim_submitted: 'shield',
+  claim_received: 'shield',
+  claim_review: 'clock',
+  claim_under_review: 'eye',
+  claim_info_required: 'alert',
   claim_approved: 'checkCircle',
   claim_rejected: 'xCircle',
   claim_completed: 'award',
   claim_pending: 'clock',
   report_verified: 'check',
   report_status: 'info',
+  report_review: 'clock',
 };
 
 // Only same-site pages (the server builds these links, but never trust a link blindly).
@@ -294,7 +304,64 @@ function initLayout(activeNav) {
 
   const pending = showPendingFlash();
   if (pending) toast(pending.message, pending.type);
+  if (user && user.needsTermsAcceptance) promptTermsAcceptance();
   return user;
+}
+
+/* ---------- Terms: existing members accept the current version ---------- */
+let termsPromptOpen = false;
+
+function loadTermsScript() {
+  return new Promise((resolve, reject) => {
+    if (typeof termsContentHtml === 'function') return resolve();
+    const script = document.createElement('script');
+    script.src = 'js/terms.js';
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+}
+
+// Shown to accounts that pre-date the Terms, and to everyone when the Terms version changes.
+async function promptTermsAcceptance() {
+  if (termsPromptOpen || /(^|\/)(terms|login|register)\.html$/.test(window.location.pathname)) return;
+  termsPromptOpen = true;
+  try {
+    await loadTermsScript();
+    const result = await openDialog({
+      title: 'Please review our Terms and Conditions',
+      size: 'lg',
+      bodyHtml: `
+        <p class="muted">We updated the rules for using ReQuora-BPSU. Please read them and confirm to keep using your account.</p>
+        <div class="terms-box" tabindex="0" role="region" aria-label="Terms and Conditions">${termsContentHtml()}</div>
+        <div class="form-field check-field"><label class="check-label" for="renew-terms">
+          <input type="checkbox" id="renew-terms"><span>I have read and agree to the Terms and Conditions and Rules and Regulations of ReQuora-BPSU.</span>
+        </label></div>`,
+      actions: [
+        { label: 'Not now', value: 'later', variant: 'ghost' },
+        {
+          label: 'I agree',
+          value: 'accept',
+          variant: 'primary',
+          validate: (panel) => {
+            const box = panel.querySelector('#renew-terms');
+            if (box.checked) return true;
+            toast('Please tick the box to agree.', 'error');
+            box.focus();
+            return false;
+          },
+        },
+      ],
+    });
+    if (result.action !== 'accept') return;
+    const data = await apiRequest('/auth/accept-terms', { method: 'POST', auth: true, body: { acceptTerms: true } });
+    updateStoredUser(data.user);
+    toast('Thank you. Your agreement was recorded.');
+  } catch (err) {
+    toast(err.message || 'Could not record your agreement. Please try again.', 'error');
+  } finally {
+    termsPromptOpen = false;
+  }
 }
 
 /* ---------- Access guards ---------- */
@@ -306,6 +373,7 @@ async function refreshSession() {
   try {
     const data = await apiRequest('/auth/me', { auth: true });
     updateStoredUser(data.user);
+    if (data.user.needsTermsAcceptance) promptTermsAcceptance();
     return data.user;
   } catch (err) {
     return null; // 401 is handled by apiRequest (redirects to login)

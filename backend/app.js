@@ -65,6 +65,8 @@ function createApp({ serveFrontend } = {}) {
       itemTypes: C.ITEM_TYPES,
       itemStatuses: C.ITEM_STATUSES,
       claimStatuses: C.CLAIM_STATUSES,
+      claimWindowHours: C.CLAIM_WINDOW_HOURS,
+      termsVersion: C.TERMS_VERSION,
       limits: C.LIMITS,
     })
   );

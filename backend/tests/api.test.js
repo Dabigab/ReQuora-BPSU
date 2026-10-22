@@ -15,7 +15,7 @@ const request = require('supertest');
 const { resetDB, createUser, getItemById } = require('../utils/db');
 const createApp = require('../app');
 const { UPLOAD_DIR } = require('../utils/imageFiles');
-const { weekdayFromNow, todayStr, validReport, uuid } = require('./helpers');
+const { weekdayFromNow, todayStr, validReport, uuid, endClaimingPeriod } = require('./helpers');
 
 const app = createApp({ serveFrontend: false });
 
@@ -28,7 +28,7 @@ after(() => {
 
 /* ---------- helpers ---------- */
 async function register(email = 'student@bpsu.edu.ph', name = 'Test Student') {
-  const res = await request(app).post('/api/auth/register').send({ name, email, password: 'password123' });
+  const res = await request(app).post('/api/auth/register').send({ name, email, password: 'password123', acceptTerms: true });
   return { token: res.body.data.token, user: res.body.data.user, res };
 }
 
@@ -108,7 +108,7 @@ describe('auth', () => {
 
   test('rejects duplicate emails (case-insensitive)', async () => {
     await register('dup@bpsu.edu.ph');
-    const again = await request(app).post('/api/auth/register').send({ name: 'Second', email: 'DUP@bpsu.edu.ph', password: 'password123' });
+    const again = await request(app).post('/api/auth/register').send({ name: 'Second', email: 'DUP@bpsu.edu.ph', password: 'password123', acceptTerms: true });
     assert.equal(again.status, 409);
   });
 
@@ -119,16 +119,50 @@ describe('auth', () => {
     assert.ok(res.body.fields.email);
     assert.ok(res.body.fields.password);
 
-    const noDigit = await request(app).post('/api/auth/register').send({ name: 'Valid Name', email: 'v@bpsu.edu.ph', password: 'onlyletters' });
+    const noDigit = await request(app).post('/api/auth/register').send({ name: 'Valid Name', email: 'v@bpsu.edu.ph', password: 'onlyletters', acceptTerms: true });
     assert.equal(noDigit.status, 400);
   });
 
   test('cannot self-register as admin', async () => {
     const res = await request(app)
       .post('/api/auth/register')
-      .send({ name: 'Sneaky Person', email: 'sneaky@bpsu.edu.ph', password: 'password123', role: 'admin' });
+      .send({ name: 'Sneaky Person', email: 'sneaky@bpsu.edu.ph', password: 'password123', role: 'admin', acceptTerms: true });
     assert.equal(res.status, 201);
     assert.equal(res.body.data.user.role, 'student');
+  });
+
+  test('registration needs the Terms and Conditions to be accepted (checked by the server)', async () => {
+    const base = { name: 'No Terms', email: 'noterms@bpsu.edu.ph', password: 'password123' };
+    for (const body of [base, { ...base, acceptTerms: false }, { ...base, acceptTerms: 'yes' }, { ...base, acceptTerms: 1 }, { ...base, acceptTerms: ['true'] }]) {
+      const res = await request(app).post('/api/auth/register').send(body);
+      assert.equal(res.status, 400);
+      assert.ok(res.body.fields.acceptTerms);
+    }
+    assert.equal(require('../utils/db').findUserByEmail('noterms@bpsu.edu.ph'), undefined); // no account was created
+  });
+
+  test('acceptance is recorded with a timestamp and the terms version', async () => {
+    const { TERMS_VERSION } = require('../utils/constants');
+    const { user } = await register('terms@bpsu.edu.ph');
+    assert.equal(user.termsAccepted, true);
+    assert.equal(user.termsVersion, TERMS_VERSION);
+    assert.ok(Date.parse(user.termsAcceptedAt));
+    assert.equal(user.needsTermsAcceptance, false);
+  });
+
+  test('an older account must accept the Terms through /accept-terms', async () => {
+    const { TERMS_VERSION } = require('../utils/constants');
+    createUser({ name: 'Old Timer', email: 'old@bpsu.edu.ph', studentId: null, passwordHash: await bcrypt.hash('password123', 10), role: 'student' });
+    const login = await request(app).post('/api/auth/login').send({ email: 'old@bpsu.edu.ph', password: 'password123' });
+    assert.equal(login.body.data.user.needsTermsAcceptance, true);
+    const token = login.body.data.token;
+
+    const refused = await request(app).post('/api/auth/accept-terms').set(auth(token)).send({});
+    assert.equal(refused.status, 400);
+    const accepted = await request(app).post('/api/auth/accept-terms').set(auth(token)).send({ acceptTerms: true });
+    assert.equal(accepted.status, 200);
+    assert.equal(accepted.body.data.user.needsTermsAcceptance, false);
+    assert.equal(accepted.body.data.user.termsVersion, TERMS_VERSION);
   });
 
   test('passwords are stored hashed', async () => {
@@ -293,8 +327,10 @@ describe('items', () => {
     assert.equal((await request(app).put(`/api/items/${id}`).set(auth(stranger.token)).send({ title: 'Hijacked' })).status, 403);
     assert.equal((await request(app).put(`/api/items/${id}`).set(auth(owner.token)).send({ status: 'returned' })).status, 403);
     assert.equal((await request(app).put(`/api/items/${id}`).set(auth(owner.token)).send({ title: 'Updated title' })).status, 200);
-    assert.equal((await request(app).put(`/api/items/${id}`).set(auth(adminToken)).send({ status: 'claimed' })).status, 200);
-    assert.equal(getItemById(id).status, 'claimed');
+    assert.equal((await request(app).put(`/api/items/${id}`).set(auth(adminToken)).send({ status: 'under_verification' })).status, 200);
+    assert.equal(getItemById(id).status, 'under_verification');
+    // "Claim approved" can only be reached by approving a claim.
+    assert.equal((await request(app).put(`/api/items/${id}`).set(auth(adminToken)).send({ status: 'claimed' })).status, 409);
   });
 
   test('"my reports" lists only my own', async () => {
@@ -355,6 +391,10 @@ describe('claims', () => {
     assert.equal((await request(app).put(`/api/claims/${claim.id}`).set(auth(claimant.token)).send({ status: 'approved' })).status, 403);
     assert.equal((await request(app).put(`/api/claims/${claim.id}`).set(auth(reporter.token)).send({ status: 'approved' })).status, 403);
     assert.equal((await request(app).get('/api/claims').set(auth(claimant.token))).status, 403);
+
+    // Not even an admin can approve while the 24-hour claiming period is still running.
+    assert.equal((await request(app).put(`/api/claims/${claim.id}`).set(auth(adminToken)).send({ status: 'approved' })).status, 409);
+    endClaimingPeriod(item.id);
 
     const approved = await request(app).put(`/api/claims/${claim.id}`).set(auth(adminToken)).send({ status: 'approved' });
     assert.equal(approved.status, 200);
@@ -449,7 +489,8 @@ describe('notifications, timelines and exports', () => {
   });
 
   test('the whole claim journey reaches the right people', async () => {
-    const { adminToken, reporter, claimant, claim } = await claimedScenario();
+    const { adminToken, reporter, claimant, claim, id } = await claimedScenario();
+    endClaimingPeriod(id);
 
     const forReporter = await request(app).get('/api/notifications').set(auth(reporter.token));
     assert.equal(forReporter.status, 200);
@@ -466,7 +507,8 @@ describe('notifications, timelines and exports', () => {
     assert.equal((await request(app).put(`/api/notifications/${note.id}/read`).set(auth(reporter.token))).status, 404);
     assert.equal((await request(app).put(`/api/notifications/${note.id}/read`).set(auth(claimant.token))).status, 200);
     const all = await request(app).put('/api/notifications/read-all').set(auth(claimant.token));
-    assert.equal(all.body.data.updated, 0);
+    assert.equal(all.body.data.updated, 2); // "claim submitted" and "awaiting review" were still unread
+    assert.equal((await request(app).put('/api/notifications/read-all').set(auth(claimant.token))).body.data.updated, 0);
   });
 
   test('CSV exports are admin-only and download as files', async () => {

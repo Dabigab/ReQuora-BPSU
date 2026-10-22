@@ -264,15 +264,18 @@ function createClaim(claim) {
   return newClaim;
 }
 
-function updateClaim(id, updates) {
+function updateClaim(id, rawUpdates) {
   const db = readDB();
   const idx = db.claims.findIndex((c) => c.id === id);
   if (idx === -1) return null;
   const before = db.claims[idx];
+  // historyNote / decidedBy only describe the history entry; they are not stored on the claim itself.
+  const { historyNote, decidedBy, ...updates } = rawUpdates;
   const next = { ...before, ...updates, updatedAt: nowIso() };
   if (updates.status && updates.status !== before.status) {
     const history = Array.isArray(before.history) ? before.history.slice() : [];
-    history.push({ status: updates.status, at: next.updatedAt, note: updates.officeNotes || null });
+    // "by" is the administrator behind a decision (null for the claimant's own actions).
+    history.push({ status: updates.status, at: next.updatedAt, note: historyNote || updates.officeNotes || null, by: decidedBy || null });
     next.history = history;
   }
   db.claims[idx] = next;

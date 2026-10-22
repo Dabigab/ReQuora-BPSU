@@ -13,7 +13,7 @@ const claimService = require('../services/claimService');
 const adminService = require('../services/adminService');
 const notificationService = require('../services/notificationService');
 const exportService = require('../services/exportService');
-const { weekdayFromNow, validReport, uuid } = require('./helpers');
+const { weekdayFromNow, validReport, uuid, endClaimingPeriod } = require('./helpers');
 
 let maria; // reporter
 let juan; // claimant
@@ -59,13 +59,39 @@ describe('notifications', () => {
     assert.match(notifications[0].link, /^item\.html\?id=/);
   });
 
-  test('filing a claim tells the reporter and every admin, not the claimant', () => {
+  test('submitting a claim tells the reporter and every admin, and confirms to the claimant', () => {
     const item = verifiedFoundItem();
     notificationService.markAllRead(maria);
     claimService.createClaim(juan, claimBody(item.id));
     assert.equal(notificationService.list(maria).unread, 1);
-    assert.equal(notificationService.list(admin).notifications.some((n) => n.type === 'claim_filed'), true);
-    assert.equal(notificationService.list(juan).notifications.length, 0);
+    assert.equal(notificationService.list(admin).notifications.some((n) => n.type === 'claim_received'), true);
+    const own = notificationService.list(juan).notifications;
+    assert.equal(own.length, 1);
+    assert.equal(own[0].type, 'claim_submitted');
+    assert.equal(own[0].title, 'Claim Submitted');
+  });
+
+  test('when the claiming period ends everyone involved is told, once', () => {
+    const item = verifiedFoundItem();
+    claimService.createClaim(juan, claimBody(item.id));
+    notificationService.markAllRead(maria);
+    notificationService.markAllRead(juan);
+    assert.equal(endClaimingPeriod(item.id), 1);
+    assert.equal(endClaimingPeriod(item.id), 0); // already handled: no second round of notifications
+    assert.equal(notificationService.list(maria).notifications[0].type, 'report_review');
+    assert.equal(notificationService.list(juan).notifications[0].type, 'claim_review');
+    assert.equal(notificationService.list(admin).notifications.some((n) => n.type === 'report_review'), true);
+  });
+
+  test('the office asking for more information, and the answer, reach the right people', () => {
+    const item = verifiedFoundItem();
+    const claim = claimService.createClaim(juan, claimBody(item.id));
+    endClaimingPeriod(item.id);
+    claimService.decideClaim(admin, claim.id, { status: 'info_required', infoRequest: 'What is written on the card inside?' });
+    const ask = notificationService.list(juan).notifications.find((n) => n.type === 'claim_info_required');
+    assert.match(ask.message, /card inside/);
+    claimService.respondToInfoRequest(juan, claim.id, { response: 'A library card with my name.' });
+    assert.equal(notificationService.list(admin).notifications.some((n) => n.title === 'Claimant answered your request'), true);
   });
 
   test('the reporter notification does not leak the proof or contact details', () => {
@@ -78,10 +104,11 @@ describe('notifications', () => {
   test('approving, rejecting and completing a claim each notify the claimant', () => {
     const item = verifiedFoundItem();
     const claim = claimService.createClaim(juan, claimBody(item.id));
+    endClaimingPeriod(item.id);
     claimService.decideClaim(admin, claim.id, { status: 'approved' });
     claimService.decideClaim(admin, claim.id, { status: 'completed' });
     const types = notificationService.list(juan).notifications.map((n) => n.type);
-    assert.deepEqual(types.sort(), ['claim_approved', 'claim_completed']);
+    assert.deepEqual(types.sort(), ['claim_approved', 'claim_completed', 'claim_review', 'claim_submitted']);
 
     const other = verifiedFoundItem();
     const claim2 = claimService.createClaim(juan, claimBody(other.id));
@@ -90,14 +117,16 @@ describe('notifications', () => {
     assert.match(rejected.message, /ID did not match/);
   });
 
-  test('completing one claim notifies the other claimants that were turned down', () => {
+  test('approving one claim notifies the other claimants that were turned down, without naming the winner', () => {
     const item = verifiedFoundItem();
     const third = makeUser('Ana Reyes', 'ana@bpsu.edu.ph');
     const a = claimService.createClaim(juan, claimBody(item.id));
     claimService.createClaim(third, claimBody(item.id));
+    endClaimingPeriod(item.id);
     claimService.decideClaim(admin, a.id, { status: 'approved' });
-    claimService.decideClaim(admin, a.id, { status: 'completed' });
-    assert.equal(notificationService.list(third).notifications.some((n) => n.type === 'claim_rejected'), true);
+    const turnedDown = notificationService.list(third).notifications.find((n) => n.type === 'claim_rejected');
+    assert.ok(turnedDown);
+    assert.doesNotMatch(JSON.stringify(notificationService.list(third)), /Juan|juan@/);
   });
 
   test('people only see and change their own notifications', () => {
@@ -131,10 +160,12 @@ describe('claim timeline', () => {
     const item = verifiedFoundItem();
     const claim = claimService.createClaim(juan, claimBody(item.id));
     assert.deepEqual(claim.timeline.map((s) => s.status), ['pending']);
+    endClaimingPeriod(item.id);
     claimService.decideClaim(admin, claim.id, { status: 'approved', officeNotes: 'Bring the ID.' });
     const done = claimService.decideClaim(admin, claim.id, { status: 'completed' });
     assert.deepEqual(done.timeline.map((s) => s.status), ['pending', 'approved', 'completed']);
     assert.equal(done.timeline[1].note, 'Bring the ID.');
+    assert.equal(done.timeline[1].byName, 'Office Admin'); // the decision records who made it
   });
 
   test('a cancelled claim shows pending then cancelled', () => {

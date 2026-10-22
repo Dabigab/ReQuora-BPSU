@@ -140,3 +140,8 @@ Error responses never include stack traces.
 
 ## Going online (Supabase + Render)
 Production data and photos are stored in **Supabase** (database + Storage) so they survive restarts. See **DEPLOYMENT.md** for the step-by-step guide, `supabase/schema.sql` for the database setup, and `backend/.env.example` for the variables. Without `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` the app falls back to a local JSON file and `backend/uploads` (development only).
+
+
+## Multiple claimants, 24-hour claiming period and Terms
+See [UPGRADE-MULTI-CLAIMANTS.md](UPGRADE-MULTI-CLAIMANTS.md) for how the claim workflow works, the Supabase migration (supabase/migrations/), and step-by-step test/deploy/rollback instructions.
+

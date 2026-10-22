@@ -20,8 +20,8 @@ const snake = (s) => s.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 
 // camelCase field -> column (snake_case). Anything not listed goes to "extra".
 const SPEC = {
-  users: ['id', 'name', 'email', 'studentId', 'passwordHash', 'role', 'createdAt', 'updatedAt'],
-  items: ['id', 'type', 'title', 'category', 'description', 'location', 'date', 'status', 'reportedBy', 'imageUrl', 'createdAt', 'updatedAt'],
+  users: ['id', 'name', 'email', 'studentId', 'passwordHash', 'role', 'termsAccepted', 'termsAcceptedAt', 'termsVersion', 'createdAt', 'updatedAt'],
+  items: ['id', 'type', 'title', 'category', 'description', 'location', 'date', 'status', 'reportedBy', 'imageUrl', 'claimDeadline', 'createdAt', 'updatedAt'],
   claims: ['id', 'itemId', 'claimantId', 'status', 'history', 'createdAt', 'updatedAt'],
   notifications: ['id', 'userId', 'type', 'title', 'message', 'link', 'read', 'createdAt'],
 };

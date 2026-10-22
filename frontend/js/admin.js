@@ -3,7 +3,7 @@
    shows the right things to the right person. */
 
 const ATABS = ['overview', 'reports', 'claims', 'users'];
-const ADMIN_STATUSES = ['pending_verification', 'lost', 'found', 'claimed', 'returned', 'closed'];
+const ADMIN_STATUSES = ['pending_verification', 'lost', 'found', 'awaiting_review', 'under_verification', 'claimed', 'returned', 'no_valid_claim', 'closed'];
 
 // Chart colours, checked with the dataviz validator (light surface).
 const CHART_LOST = '#2a5db0';
@@ -159,7 +159,7 @@ async function loadOverview() {
   panel.innerHTML = `<div class="stat-cards">${'<div class="stat-card skeleton-block" aria-hidden="true"></div>'.repeat(6)}</div>`;
   try {
     const { stats, recentReports, recentClaims } = await apiRequest('/admin/stats', { auth: true });
-    setClaimsPill(stats.pendingClaims);
+    setClaimsPill(stats.claimsToReview);
     const byStatus = ADMIN_STATUSES.map((s) => ({ label: statusLabel(s), count: stats.byStatus[s] || 0 }));
     const byCategory = stats.byCategory.map((c) => ({ label: c.category, count: c.count }));
 
@@ -168,10 +168,15 @@ async function loadOverview() {
         ${statTile('file', 'Total Reports', stats.totalReports, '', '#reports')}
         ${statTile('search', 'Lost Items', stats.lost, 'tone-lost')}
         ${statTile('check', 'Found Items', stats.found, 'tone-found')}
-        ${statTile('shield', 'Pending Claims', stats.pendingClaims, 'tone-claim', '#claims')}
-        ${statTile('award', 'Returned Items', stats.returned, 'tone-returned')}
+        ${statTile('shield', 'Claims to Review', stats.claimsToReview, 'tone-claim', '#claims')}
+        ${statTile('award', 'Resolved Items', stats.returned, 'tone-returned')}
         ${statTile('users', 'Users', stats.users, '', '#users')}
       </div>
+      ${
+        stats.awaitingReview
+          ? `<div class="note note-gold">${icon('clock', 18)}<span><strong>${stats.awaitingReview}</strong> report${stats.awaitingReview === 1 ? ' has' : 's have'} finished the 24-hour claiming period and need${stats.awaitingReview === 1 ? 's' : ''} your decision. <a href="#reports" data-go-review>Review them</a></span></div>`
+          : ''
+      }
       ${
         stats.pendingVerification
           ? `<div class="note note-gold">${icon('alert', 18)}<span><strong>${stats.pendingVerification}</strong> report${stats.pendingVerification === 1 ? ' is' : 's are'} waiting for verification. <a href="#reports" data-go-pending>Review them</a></span></div>`
@@ -190,6 +195,13 @@ async function loadOverview() {
       </div>`;
     wireChartTips(panel);
     panel.querySelectorAll('.hbar').forEach((row) => row.setAttribute('title', row.dataset.tip));
+    const reviewLink = panel.querySelector('[data-go-review]');
+    if (reviewLink) {
+      reviewLink.addEventListener('click', () => {
+        reportFilters = { q: '', type: '', status: 'awaiting_review', category: '', page: 1 };
+        loadedTabs.reports = false;
+      });
+    }
     const pendingLink = panel.querySelector('[data-go-pending]');
     if (pendingLink) {
       pendingLink.addEventListener('click', () => {
@@ -232,15 +244,15 @@ function reportRow(i) {
     <tr>
       <td data-label="Item"><a class="strong-link" href="${escapeHtml(itemUrl(i.id))}" data-item-id="${escapeHtml(i.id)}">${escapeHtml(i.title)}</a><small class="cell-sub">${escapeHtml(i.reference)} · ${escapeHtml(i.category)}</small></td>
       <td data-label="Type">${typeBadge(i.type)}</td>
-      <td data-label="Status">${statusBadge(i.status)}</td>
+      <td data-label="Status">${isOpenForClaims(i) ? openForClaimsBadge() + countdownHtml(i) : statusBadge(i.status)}</td>
       <td data-label="Reported by">${escapeHtml(i.reportedByName)}<small class="cell-sub">${escapeHtml(i.reporterEmail || '')}</small></td>
-      <td data-label="Claims">${i.claimsCount}${i.pendingClaims ? ` <span class="badge badge-pending">${i.pendingClaims} pending</span>` : ''}</td>
-      <td data-label="Reported">${escapeHtml(formatDate(i.createdAt))}</td>
+      <td data-label="Claims">${i.claimsCount}${i.pendingClaims ? ` <span class="badge badge-pending">${i.pendingClaims} to review</span>` : ''}</td>
+      <td data-label="Published">${escapeHtml(formatDateTime(i.createdAt))}</td>
       <td data-label="Actions" class="actions-cell">
         <a class="btn btn-outline btn-sm" href="${escapeHtml(itemUrl(i.id))}" data-item-id="${escapeHtml(i.id)}">View</a>
         ${open ? `<button type="button" class="btn btn-gold btn-sm" data-verify="${escapeHtml(i.id)}">Verify</button>` : ''}
         <button type="button" class="btn btn-ghost btn-sm" data-status="${escapeHtml(i.id)}" data-current="${escapeHtml(i.status)}" data-title="${escapeHtml(i.title)}" data-type="${escapeHtml(i.type)}">Status</button>
-        ${i.claimsCount ? `<button type="button" class="btn btn-ghost btn-sm" data-review-item="${escapeHtml(i.id)}">Claims</button>` : ''}
+        ${i.claimsCount ? `<a class="btn btn-ghost btn-sm" href="${escapeHtml(itemUrl(i.id))}" data-item-id="${escapeHtml(i.id)}">Review claims</a>` : ''}
         <button type="button" class="btn btn-danger-outline btn-sm" data-delete="${escapeHtml(i.id)}" data-title="${escapeHtml(i.title)}" aria-label="Delete ${escapeHtml(i.title)}">${icon('trash', 15)}</button>
       </td>
     </tr>`;
@@ -272,8 +284,9 @@ async function loadReports() {
       return;
     }
     table.innerHTML = `<div class="table-wrap"><table class="data-table responsive">
-      <thead><tr><th>Item</th><th>Type</th><th>Status</th><th>Reported by</th><th>Claims</th><th>Reported</th><th><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><th>Item</th><th>Type</th><th>Status</th><th>Reported by</th><th>Claims</th><th>Published</th><th><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>${data.items.map(reportRow).join('')}</tbody></table></div>`;
+    startCountdowns(loadReports);
     renderPagination(q('rep-pagination'), data.pagination, (n) => {
       reportFilters.page = n;
       loadReports();
@@ -344,26 +357,17 @@ function wireReportRows(table) {
   );
 
   table.querySelectorAll('[data-status]').forEach((btn) => btn.addEventListener('click', () => openStatusDialog(btn.dataset)));
-
-  table.querySelectorAll('[data-review-item]').forEach((btn) =>
-    btn.addEventListener('click', () => {
-      claimFilter = '';
-      loadedTabs.claims = false;
-      claimItemFilter = btn.dataset.reviewItem;
-      selectTab('claims');
-    })
-  );
 }
 
 async function openStatusDialog({ status: id, current, title, type }) {
-  const options = ['pending_verification', type, 'claimed', 'returned', 'closed'];
+  const options = [...new Set(['pending_verification', type, 'awaiting_review', 'under_verification', 'no_valid_claim', 'returned', 'closed', current])];
   const result = await openDialog({
     title: 'Update status',
     bodyHtml: `
       <p class="muted">${escapeHtml(title)}</p>
       <div class="form-field"><label for="new-status">New status</label>
         <select id="new-status">${options.map((s) => `<option value="${s}" ${s === current ? 'selected' : ''}>${escapeHtml(statusLabel(s))}</option>`).join('')}</select></div>
-      <p class="field-hint">Returned completes an approved claim and rejects other open claims. Closed rejects all open claims.</p>`,
+      <p class="field-hint">Resolved completes an approved claim and rejects other open claims. Closed rejects all open claims. To approve a claimant, open the report and use the claim review. A report whose claiming period ended is reopened with “Reopen claiming” on its page.</p>`,
     actions: [
       { label: 'Cancel', value: 'cancel', variant: 'ghost' },
       { label: 'Update status', value: 'save', variant: 'primary' },
@@ -393,9 +397,9 @@ function claimRow(c) {
       <td data-label="Item"><a class="strong-link" href="${escapeHtml(itemUrl(c.itemId))}" data-item-id="${escapeHtml(c.itemId)}">${escapeHtml(c.itemTitle)}</a><small class="cell-sub">${escapeHtml(c.reference)}</small></td>
       <td data-label="Claimant">${escapeHtml(c.claimantName)}<small class="cell-sub">${escapeHtml(c.claimantEmail || '')}</small></td>
       <td data-label="Type">${c.claimType === 'ownership' ? 'Ownership' : 'Finder report'}</td>
-      <td data-label="Appointment">${escapeHtml(formatDate(c.appointmentDate))}<small class="cell-sub">${escapeHtml(formatTime12(c.appointmentTime))}</small></td>
+      <td data-label="Submitted">${escapeHtml(formatDateTime(c.createdAt))}</td>
       <td data-label="Status">${claimBadge(c.status)}</td>
-      <td data-label="Actions" class="actions-cell"><button type="button" class="btn btn-outline btn-sm" data-review="${escapeHtml(c.id)}">${c.status === 'pending' || c.status === 'approved' ? 'Review' : 'View'}</button></td>
+      <td data-label="Actions" class="actions-cell"><a class="btn btn-outline btn-sm" href="${escapeHtml(itemUrl(c.itemId))}" data-item-id="${escapeHtml(c.itemId)}">${['pending', 'under_review', 'info_required', 'approved'].includes(c.status) ? 'Review' : 'View'}</a></td>
     </tr>`;
 }
 
@@ -407,7 +411,7 @@ async function loadClaims() {
         <div class="form-field"><label for="claim-filter">Status</label>
           <select id="claim-filter">
             <option value="">All claims</option>
-            ${['pending', 'approved', 'rejected', 'completed', 'cancelled'].map((s) => `<option value="${s}">${escapeHtml(claimStatusLabel(s))}</option>`).join('')}
+            ${['pending', 'under_review', 'info_required', 'approved', 'rejected', 'completed', 'cancelled'].map((s) => `<option value="${s}">${escapeHtml(claimStatusLabel(s))}</option>`).join('')}
           </select></div>
         <div id="claim-item-chip"></div>
         <button type="button" class="btn btn-outline btn-sm push-right" data-export="claims">${icon('download', 15)} Export CSV</button>
@@ -440,86 +444,18 @@ async function loadClaims() {
     const shown = claimItemFilter ? allClaims.filter((c) => c.itemId === claimItemFilter) : allClaims;
     q('claim-count').textContent = `${shown.length} claim${shown.length === 1 ? '' : 's'}`;
     if (!shown.length) {
-      table.innerHTML = stateBlock({ iconName: 'shield', title: 'No claims found', text: claimFilter ? 'No claims have this status.' : 'No one has filed a claim yet.' });
+      table.innerHTML = stateBlock({ iconName: 'shield', title: 'No claims found', text: claimFilter ? 'No claims have this status.' : 'No one has submitted a claim yet.' });
       return;
     }
     table.innerHTML = `<div class="table-wrap"><table class="data-table responsive">
-      <thead><tr><th>Item</th><th>Claimant</th><th>Type</th><th>Appointment</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><th>Item</th><th>Claimant</th><th>Type</th><th>Submitted</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>${shown.map(claimRow).join('')}</tbody></table></div>`;
-    table.querySelectorAll('[data-review]').forEach((btn) => btn.addEventListener('click', () => openReviewDialog(allClaims.find((c) => c.id === btn.dataset.review))));
   } catch (err) {
     table.innerHTML = errorState(err, { retryId: 'retry-claims' });
     const retry = q('retry-claims');
     if (retry) retry.addEventListener('click', loadClaims);
   } finally {
     table.setAttribute('aria-busy', 'false');
-  }
-}
-
-const NEXT_CLAIM_ACTIONS = {
-  pending: [
-    { value: 'approved', label: 'Approve', variant: 'primary' },
-    { value: 'rejected', label: 'Reject', variant: 'danger' },
-  ],
-  approved: [
-    { value: 'completed', label: 'Mark item handed over', variant: 'primary' },
-    { value: 'rejected', label: 'Reject', variant: 'danger' },
-  ],
-  rejected: [{ value: 'pending', label: 'Reopen as pending', variant: 'primary' }],
-  completed: [],
-  cancelled: [],
-};
-
-async function openReviewDialog(claim) {
-  if (!claim) return;
-  const actions = [{ label: 'Close', value: 'close', variant: 'ghost' }].concat(NEXT_CLAIM_ACTIONS[claim.status] || []);
-  const editable = actions.length > 1;
-  const result = await openDialog({
-    title: `Claim ${claim.reference}`,
-    size: 'lg',
-    bodyHtml: `
-      <div class="badge-row">${claimBadge(claim.status)}${claim.itemStatus ? statusBadge(claim.itemStatus) : ''}</div>
-      <dl class="detail-list">
-        <dt>Item</dt><dd><a href="${escapeHtml(itemUrl(claim.itemId))}" data-item-id="${escapeHtml(claim.itemId)}">${escapeHtml(claim.itemTitle)}</a> (${escapeHtml(claim.itemReference)})</dd>
-        <dt>Claimant</dt><dd>${escapeHtml(claim.claimantName)} · ${escapeHtml(claim.claimantEmail || '')}</dd>
-        <dt>Contact</dt><dd>${escapeHtml(claim.contactInfo || '—')}</dd>
-        <dt>Appointment</dt><dd>${escapeHtml(formatDate(claim.appointmentDate))} at ${escapeHtml(formatTime12(claim.appointmentTime))}</dd>
-        <dt>Filed</dt><dd>${escapeHtml(formatDateTime(claim.createdAt))}</dd>
-        <dt>Progress</dt><dd>${claimTimelineHtml(claim)}</dd>
-        <dt>${claim.claimType === 'ownership' ? 'Proof of ownership' : 'Finder’s account'}</dt><dd class="proof">${multiline(claim.proofDescription)}</dd>
-      </dl>
-      ${
-        editable
-          ? `<div class="form-field"><label for="office-notes">Office notes <span class="optional">(shown to the claimant)</span></label>
-              <textarea id="office-notes" rows="3" maxlength="500">${escapeHtml(claim.officeNotes || '')}</textarea></div>`
-          : claim.officeNotes
-            ? `<p class="muted"><strong>Office notes:</strong> ${escapeHtml(claim.officeNotes)}</p>`
-            : ''
-      }`,
-    actions,
-    collect: (panel) => ({ notes: (panel.querySelector('#office-notes') || {}).value || '' }),
-  });
-  if (!result.action || result.action === 'close') return;
-
-  // Rejecting or completing is hard to take back, so it asks once more.
-  if (['rejected', 'completed'].includes(result.action)) {
-    const yes = await confirmDialog({
-      title: result.action === 'rejected' ? 'Reject this claim?' : 'Mark as handed over?',
-      message:
-        result.action === 'rejected'
-          ? 'The claimant will see the rejection and your notes.'
-          : 'This records that the item was released and marks the report as returned.',
-      confirmText: result.action === 'rejected' ? 'Reject claim' : 'Mark handed over',
-      danger: result.action === 'rejected',
-    });
-    if (!yes) return;
-  }
-  try {
-    await apiRequest(`/claims/${claim.id}`, { method: 'PUT', auth: true, body: { status: result.action, officeNotes: result.data.notes.trim() } });
-    toast('Claim updated.');
-    refreshAdmin();
-  } catch (err) {
-    toast(err.message, 'error');
   }
 }
 
@@ -591,7 +527,7 @@ function refreshAdmin() {
   LOADERS[active]();
   if (active !== 'overview') {
     apiRequest('/admin/stats', { auth: true })
-      .then((d) => setClaimsPill(d.stats.pendingClaims))
+      .then((d) => setClaimsPill(d.stats.claimsToReview))
       .catch(() => {});
   }
 }

@@ -21,11 +21,11 @@
       <div>
         <p class="eyebrow">My dashboard</p>
         <h1 id="welcome">Welcome</h1>
-        <p id="welcome-sub">Here is what is happening with your reports and claims.</p>
+        <p id="welcome-sub">My Reports are items you reported. My Claims are items you say belong to you.</p>
       </div>
       <div class="dash-actions">
-        <a href="report.html?type=lost" class="btn btn-gold"><span data-icon="plus"></span> Report lost</a>
-        <a href="report.html?type=found" class="btn btn-light"><span data-icon="plus"></span> Report found</a>
+        <a href="report.html" class="btn btn-gold"><span data-icon="plus"></span> Report an Item</a>
+        <a href="browse.html?type=found" class="btn btn-light"><span data-icon="search"></span> Submit a Claim</a>
       </div>
     </div>
   </section>
@@ -34,8 +34,8 @@
     <div class="stat-cards" id="dash-stats" aria-live="polite"></div>
 
     <div class="tabs" role="tablist" aria-label="Dashboard sections">
-      <button role="tab" id="tab-reports" aria-controls="panel-reports" aria-selected="true" data-tab="reports">My reports</button>
-      <button role="tab" id="tab-claims" aria-controls="panel-claims" aria-selected="false" data-tab="claims" tabindex="-1">My claims</button>
+      <button role="tab" id="tab-reports" aria-controls="panel-reports" aria-selected="true" data-tab="reports">My Reports</button>
+      <button role="tab" id="tab-claims" aria-controls="panel-claims" aria-selected="false" data-tab="claims" tabindex="-1">My Claims</button>
       <button role="tab" id="tab-activity" aria-controls="panel-activity" aria-selected="false" data-tab="activity" tabindex="-1">Recent activity</button>
       <button role="tab" id="tab-profile" aria-controls="panel-profile" aria-selected="false" data-tab="profile" tabindex="-1">Profile</button>
     </div>

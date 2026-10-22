@@ -25,6 +25,7 @@ function applyTypeWording() {
   $('location').placeholder = lost ? 'e.g. Main Library, 2nd floor reading area' : 'e.g. Canteen, table near the entrance';
   $('form-title').textContent = lost ? 'Report a lost item' : 'Report a found item';
   document.title = `${lost ? 'Report a lost item' : 'Report a found item'} — ReQuora`;
+  $('hint-field').hidden = lost; // only a finder can describe a private check-detail for the owner
   $('label-lost').classList.toggle('selected', lost);
   $('label-found').classList.toggle('selected', !lost);
 }
@@ -125,10 +126,12 @@ function showSuccess(item, type) {
   box.innerHTML = `
     <div class="success-card" role="status">
       <span class="success-icon">${icon('checkCircle', 40)}</span>
-      <h2>Report submitted successfully!</h2>
-      <p>Your item has been added to ReQuora.</p>
-      <p class="muted">Reference number <strong>${escapeHtml(item.reference)}</strong>. The office will verify your report shortly. ${
-        lost ? 'We will show it to anyone who finds a match.' : 'Please hand the item to the Lost &amp; Found Office so the owner can collect it.'
+      <h2>Report Submitted</h2>
+      <p>Your report has been added to ReQuora and appears under <strong>My Reports</strong>.</p>
+      <p class="muted">Reference number <strong>${escapeHtml(item.reference)}</strong>. ${
+        lost
+          ? 'We will show it to anyone who finds a match.'
+          : 'People who think the item is theirs can submit claims for the next 24 hours. After that the office compares the evidence and decides who the owner is. You are the finder, not a claimant. Please hand the item to the Lost &amp; Found Office so it can be returned.'
       }</p>
       <div class="inline-actions center">
         <a class="btn btn-primary" href="${escapeHtml(itemUrl(item.id))}" data-item-id="${escapeHtml(item.id)}">View my report</a>
@@ -155,7 +158,7 @@ async function onSubmit(e) {
   }
 
   const body = new FormData();
-  ['type', 'title', 'category', 'description', 'location', 'date', 'time', 'additionalDetails', 'contactInfo'].forEach((k) => {
+  ['type', 'title', 'category', 'description', 'location', 'date', 'time', 'additionalDetails', 'contactInfo', 'verificationHint'].forEach((k) => {
     const v = (values[k] || '').toString().trim();
     if (v) body.append(k, v);
   });
@@ -172,6 +175,7 @@ async function onSubmit(e) {
     setFormMessage($('form-msg'), orphan[0] || err.message, 'error');
   }
 }
+
 
 document.addEventListener('DOMContentLoaded', async () => {
   initLayout('report');

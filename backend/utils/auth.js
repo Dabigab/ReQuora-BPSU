@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { Errors } = require('./http');
 const { findUserById } = require('./db');
+const { TERMS_VERSION } = require('./constants');
 
 const PLACEHOLDER_SECRETS = [
   'replace_this_with_a_long_random_secret_before_deploying',
@@ -69,6 +70,12 @@ function publicUser(user) {
     studentId: user.studentId || null,
     role: user.role,
     createdAt: user.createdAt,
+    termsAccepted: !!user.termsAccepted,
+    termsAcceptedAt: user.termsAcceptedAt || null,
+    termsVersion: user.termsVersion || null,
+    // True when this person has not accepted the current Terms yet (accounts that pre-date the Terms, or a newer version).
+    // Administrator accounts are created by the server, not by the sign-up form, so they are not asked.
+    needsTermsAcceptance: user.role !== 'admin' && (!user.termsAccepted || user.termsVersion !== TERMS_VERSION),
   };
 }
 

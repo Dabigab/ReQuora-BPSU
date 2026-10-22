@@ -20,7 +20,7 @@ const claimLimiter = createRateLimiter({
   message: 'You are filing claims too quickly. Please wait a few minutes.',
 });
 
-// POST /api/claims — file a claim and book the office visit
+// POST /api/claims — submit a claim (the claimant is always the logged-in user, never taken from the body)
 router.post('/', claimLimiter, authenticateToken, (req, res) => {
   const claim = claimService.createClaim(req.user, req.body);
   return ok(res, { claim }, 'Claim submitted. The office will review it.', 201);
@@ -41,6 +41,12 @@ router.get('/', authenticateToken, requireAdmin, (req, res) => ok(res, { claims:
 router.put('/:id/cancel', authenticateToken, (req, res) => {
   const claim = claimService.cancelClaim(req.user, req.params.id);
   return ok(res, { claim }, 'Claim cancelled.');
+});
+
+// PUT /api/claims/:id/respond — answer the office's request for more evidence (my own claim only)
+router.put('/:id/respond', authenticateToken, (req, res) => {
+  const claim = claimService.respondToInfoRequest(req.user, req.params.id, req.body);
+  return ok(res, { claim }, 'Thank you. The office has your answer.');
 });
 
 // PUT /api/claims/:id — the office's decision (admin only)

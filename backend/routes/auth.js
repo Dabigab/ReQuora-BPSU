@@ -3,7 +3,7 @@ const bcrypt = require('bcryptjs');
 const { findUserByEmail, findUserById, createUser, updateUser } = require('../utils/db');
 const { generateToken, authenticateToken, publicUser } = require('../utils/auth');
 const { Errors, ok, asyncHandler } = require('../utils/http');
-const { SELF_REGISTER_ROLES, LIMITS } = require('../utils/constants');
+const { SELF_REGISTER_ROLES, LIMITS, TERMS_VERSION } = require('../utils/constants');
 const { textField, throwIfInvalid, isEmail, clean, asString } = require('../utils/validate');
 const { createRateLimiter } = require('../utils/rateLimit');
 
@@ -25,6 +25,9 @@ function checkPassword(fields, name, raw, label) {
   return value;
 }
 
+// Only a real `true` (or the string "true" from a form) counts as agreement.
+const isTrue = (v) => v === true || v === 'true';
+
 // POST /api/auth/register
 router.post(
   '/register',
@@ -38,6 +41,10 @@ router.post(
     const studentId = textField(fields, 'studentId', req.body.studentId, { label: 'Student / employee ID', max: LIMITS.studentId.max });
     const password = checkPassword(fields, 'password', req.body.password, 'Password');
     const requestedRole = clean(asString(req.body.role));
+    // The agreement is checked here as well as in the browser, so a hand-made request cannot skip it.
+    if (!isTrue(req.body.acceptTerms)) {
+      fields.acceptTerms = 'You must read and agree to the Terms and Conditions and Rules and Regulations to create an account.';
+    }
     throwIfInvalid(fields, 'Please check the highlighted fields.');
 
     if (findUserByEmail(email)) {
@@ -50,7 +57,17 @@ router.post(
     // created by the server (see ADMIN_EMAIL in .env) and never by this form.
     const role = SELF_REGISTER_ROLES.includes(requestedRole) ? requestedRole : 'student';
 
-    const user = createUser({ name, email, studentId: studentId || null, passwordHash, role });
+    // Acceptance is recorded with the server's clock and the version that was in force.
+    const user = createUser({
+      name,
+      email,
+      studentId: studentId || null,
+      passwordHash,
+      role,
+      termsAccepted: true,
+      termsAcceptedAt: new Date().toISOString(),
+      termsVersion: TERMS_VERSION,
+    });
     return ok(res, { token: generateToken(user), user: publicUser(user) }, 'Account created. Welcome to ReQuora!', 201);
   })
 );
@@ -79,6 +96,15 @@ router.post(
 
 // GET /api/auth/me — who am I? (also lets the frontend confirm a stored token is still valid)
 router.get('/me', authenticateToken, (req, res) => ok(res, { user: req.user }));
+
+// POST /api/auth/accept-terms — existing members accept the current Terms (new version, or accounts made before the Terms)
+router.post('/accept-terms', authenticateToken, (req, res) => {
+  if (!isTrue(req.body.acceptTerms)) {
+    throw Errors.validation('Please tick the box to accept the Terms and Conditions.', { acceptTerms: 'You must agree to continue.' });
+  }
+  const updated = updateUser(req.user.id, { termsAccepted: true, termsAcceptedAt: new Date().toISOString(), termsVersion: TERMS_VERSION });
+  return ok(res, { user: publicUser(updated) }, 'Thank you. Your agreement was recorded.');
+});
 
 // PUT /api/auth/me — update my own profile
 router.put(
